@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -128,6 +129,11 @@ class DeviceRegistrar:
                 "verification_code": self._verification_code,
             }
             token_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            # write_text doesn't take a mode, so the file lands at whatever
+            # the umask leaves it — commonly 644, world-readable. This is a
+            # credential (device_token authenticates as this device), so
+            # lock it down explicitly rather than trust the deployment's umask.
+            os.chmod(token_file, 0o600)
             logger.info(f"Device token saved to {token_file}")
         except Exception as e:
             logger.warning(f"Failed to save token to {token_file}: {e}")
