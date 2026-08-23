@@ -26,8 +26,13 @@ ProtectControlGroups=true
 # Allow USB printer access
 SupplementaryGroups=lp plugdev
 
-# Allow write access to cache and logs
-ReadWritePaths=/opt/openeos-printer-agent/cache /var/log/openeos-printer
+# Allow write access to cache, logs, and the persisted device token +
+# crash-safe job queue (both default under /var/lib/openeos-printer — see
+# device_token_file / job_store_file in src/config.py). Without this,
+# self-registration silently fails to persist under ProtectSystem=strict
+# and the agent re-registers with a new token/verification code on every
+# restart.
+ReadWritePaths=/opt/openeos-printer-agent/cache /var/log/openeos-printer /var/lib/openeos-printer
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
