@@ -128,3 +128,28 @@ class TestJobQueue:
             on_failed.assert_awaited_once()
         finally:
             await jq.stop_workers()
+
+    @pytest.mark.asyncio
+    async def test_worker_reports_failure_for_unexpected_exception(
+        self, job_queue, sample_print_job
+    ):
+        # A bug anywhere _process_job doesn't already handle (not just the
+        # printer-not-found/queue-full cases it classifies itself) must still
+        # surface as a reported failure, not vanish silently with the job
+        # never acknowledged either way.
+        on_failed = AsyncMock()
+        job_queue._on_job_failed = on_failed
+        job_queue.start_workers()
+        try:
+            with patch.object(
+                job_queue, "_process_job", side_effect=RuntimeError("boom")
+            ):
+                await job_queue.enqueue(sample_print_job)
+                await asyncio.wait_for(
+                    job_queue._queues["printer-001"].join(), timeout=2
+                )
+            on_failed.assert_awaited_once()
+            args = on_failed.call_args.args
+            assert args[1] == "WORKER_ERROR"
+        finally:
+            await job_queue.stop_workers()

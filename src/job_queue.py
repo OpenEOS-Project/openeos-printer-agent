@@ -3,10 +3,10 @@ import logging
 import time
 from typing import Callable, Optional
 
-from .printer_manager import PrinterManager, PrinterStatus
-from .template_engine import TemplateEngine
 from .escpos_renderer import render_to_printer
 from .job_store import JobStore
+from .printer_manager import PrinterManager, PrinterStatus
+from .template_engine import TemplateEngine
 
 logger = logging.getLogger(__name__)
 
@@ -161,12 +161,28 @@ class JobQueue:
         while True:
             try:
                 job: PrintJob = await queue.get()
-                await self._process_job(printer_id, job)
-                queue.task_done()
             except asyncio.CancelledError:
                 break
+
+            try:
+                await self._process_job(printer_id, job)
+            except asyncio.CancelledError:
+                queue.task_done()
+                raise
             except Exception as e:
-                logger.error(f"Worker error for printer {printer_id}: {e}")
+                # _process_job already reports the failures it knows how to
+                # classify (printer not found, render error, etc.) — this is
+                # the catch-all for anything that slips past that, e.g. a bug
+                # in _report_complete/_report_failed itself. Without this,
+                # the job was silently dropped: no retry, no failure report,
+                # nobody notified a print job vanished.
+                logger.error(f"Worker error for printer {printer_id}, job {job.job_id}: {e}")
+                try:
+                    await self._report_failed(job.job_id, "WORKER_ERROR", str(e))
+                except Exception as report_err:
+                    logger.error(f"Also failed to report failure for job {job.job_id}: {report_err}")
+            finally:
+                queue.task_done()
 
     async def _process_job(self, printer_id: str, job: PrintJob) -> None:
         """Process a single print job with retry logic."""
