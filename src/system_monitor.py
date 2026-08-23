@@ -92,8 +92,8 @@ class SystemMonitor:
                         break
                 if info["ip_address"]:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to determine IP address: {e}")
 
         # Get WiFi SSID (Linux)
         try:

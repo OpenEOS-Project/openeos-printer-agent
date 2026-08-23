@@ -3,7 +3,7 @@ import logging
 from enum import Enum
 from typing import Optional
 
-from escpos.printer import Usb, Network
+from escpos.printer import Network, Usb
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +106,8 @@ class ManagedPrinter:
             loop = asyncio.get_event_loop()
             try:
                 await loop.run_in_executor(None, self._escpos.close)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing printer '{self.name}' ({self.printer_id}): {e}")
             self._escpos = None
         self.status = PrinterStatus.OFFLINE
 
