@@ -8,8 +8,8 @@ from .version import __version__
 if TYPE_CHECKING:
     from .config import AppConfig
     from .device_registrar import DeviceRegistrar
-    from .printer_manager import PrinterManager
     from .job_queue import JobQueue
+    from .printer_manager import PrinterManager
     from .system_monitor import SystemMonitor
     from .websocket_client import WebSocketClient
 
@@ -209,12 +209,14 @@ class LocalServer:
     async def _handle_api_status(self, request: web.Request) -> web.Response:
         # Setup mode
         if self._device_registrar and not self._printer_manager:
-            return web.json_response({
-                "mode": "setup",
-                "status": self._device_registrar.status,
-                "verificationCode": self._device_registrar.verification_code,
-                "deviceId": self._device_registrar.device_id,
-            })
+            return web.json_response(
+                {
+                    "mode": "setup",
+                    "status": self._device_registrar.status,
+                    "verificationCode": self._device_registrar.verification_code,
+                    "deviceId": self._device_registrar.device_id,
+                }
+            )
 
         sys_info = await self._get_system_info()
         data = {
@@ -295,7 +297,9 @@ class LocalServer:
                         break
                 q_rows += f"<tr><td>{printer_name}</td><td>{stats.get('pending', 0)}</td>"
                 q_rows += f"<td>{stats.get('completed', 0)}</td><td>{stats.get('failed', 0)}</td></tr>"
-            queue_table = f"<table><tr><th>Printer</th><th>Pending</th><th>Completed</th><th>Failed</th></tr>{q_rows}</table>"
+            queue_table = (
+                f"<table><tr><th>Printer</th><th>Pending</th><th>Completed</th><th>Failed</th></tr>{q_rows}</table>"
+            )
         else:
             queue_table = "<p>No queue data</p>"
 

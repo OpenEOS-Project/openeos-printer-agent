@@ -207,9 +207,7 @@ class JobQueue:
                 )
 
                 # Send to printer
-                await printer.execute(
-                    lambda p, r=rendered, o={"copies": job.copies}: render_to_printer(p, r, o)
-                )
+                await printer.execute(lambda p, r=rendered, o={"copies": job.copies}: render_to_printer(p, r, o))
 
                 # Success
                 job.status = "completed"
@@ -222,9 +220,7 @@ class JobQueue:
             except Exception as e:
                 error_msg = str(e)
                 error_code = printer.last_error_code.value if printer.last_error_code else "UNKNOWN"
-                logger.warning(
-                    f"Job {job.job_id} attempt {job.attempts}/{max_attempts} failed: {error_msg}"
-                )
+                logger.warning(f"Job {job.job_id} attempt {job.attempts}/{max_attempts} failed: {error_msg}")
 
                 if job.attempts < max_attempts:
                     delay = RETRY_DELAYS[job.attempts - 1]
