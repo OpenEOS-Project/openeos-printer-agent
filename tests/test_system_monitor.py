@@ -1,4 +1,3 @@
-from unittest.mock import patch, MagicMock
 import pytest
 
 from src.system_monitor import SystemMonitor
