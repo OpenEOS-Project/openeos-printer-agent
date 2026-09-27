@@ -1,5 +1,8 @@
 from unittest.mock import MagicMock, call
 
+from escpos.printer import Dummy
+from PIL import Image
+
 from src.escpos_renderer import _handle_tag, render_to_printer
 
 
@@ -102,3 +105,43 @@ class TestHandleTag:
         printer = MagicMock()
         result = _handle_tag(printer, "UNKNOWN_TAG", None)
         assert result is False
+
+
+class TestRealPillowRendering:
+    """Every test above uses a MagicMock printer, so printer.image() is never
+    actually called with a real Pillow image — these tests never exercise
+    qrcode/PIL/python-barcode themselves and wouldn't notice a Pillow version
+    bump breaking image generation (see #15: Pillow's ceiling was raised to
+    admit Python 3.13+ wheels).
+
+    These use python-escpos's own Dummy printer instead, which is real
+    (non-mocked) code that turns a Pillow Image into ESC/POS raster bytes —
+    so a Pillow API break in printer.image()'s image-handling path would
+    surface here as an exception, not just a changed byte count.
+    """
+
+    def test_qrcode_renders_without_error(self):
+        printer = Dummy()
+        render_to_printer(printer, "<<QRCODE:https://openeos.de/order/1>>")
+        # A real ESC/POS raster image sequence was emitted, not the
+        # "[QR: ...]" fallback text printed on error.
+        assert len(printer.output) > 100
+        assert b"[QR:" not in printer.output
+
+    def test_barcode_renders_without_error(self):
+        printer = Dummy()
+        render_to_printer(printer, "<<BARCODE:CODE128:ABC1234567890>>")
+        assert len(printer.output) > 100
+
+    def test_image_file_renders_without_error(self, tmp_path):
+        logo_path = tmp_path / "logo.png"
+        img = Image.new("1", (32, 32))
+        for y in range(32):
+            for x in range(32):
+                img.putpixel((x, y), 1 if (x // 4 + y // 4) % 2 == 0 else 0)
+        img.save(logo_path)
+
+        printer = Dummy()
+        render_to_printer(printer, f"<<IMAGE:{logo_path}>>")
+        assert len(printer.output) > 50
+        assert b"[IMG:" not in printer.output
