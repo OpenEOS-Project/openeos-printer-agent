@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel
@@ -22,12 +22,17 @@ class PrinterConfig(BaseModel):
     localId: str
     name: str
     type: str = "receipt"  # receipt | kitchen | label
-    connectionType: str = "usb"  # usb | network | bluetooth
+    # Enger als ein einfaches str: ein Tippfehler hier (z.B. "USB",
+    # "netwerk") soll beim Start hart fehlschlagen statt erst am Kassentisch
+    # als Drucker, der nie druckt, aufzufallen.
+    connectionType: Literal["usb", "network", "bluetooth"] = "usb"
     usbVendorId: Optional[str] = None  # e.g. "0x04b8"
     usbProductId: Optional[str] = None  # e.g. "0x0202"
     ipAddress: Optional[str] = None  # for network printers
     port: Optional[int] = None
-    paperWidth: int = 80  # 58 or 80 mm
+    # Nur 58/80 mm Thermorollen werden unterstützt; alles andere ergibt ein
+    # Layout, das auf der echten Rolle nicht passt.
+    paperWidth: Literal[58, 80] = 80
 
 
 class ServerConfig(BaseModel):
