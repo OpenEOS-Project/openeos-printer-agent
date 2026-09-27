@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from enum import Enum
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from escpos.printer import Network, Usb
 
@@ -27,13 +27,13 @@ class PrinterErrorCode(str, Enum):
 class ManagedPrinter:
     """Wrapper for a single physical printer with status tracking and locking."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.printer_id: str = config["id"]
         self.name: str = config.get("name", "Unknown")
         self.connection_type: str = config.get("connectionType", "usb")
         self.paper_width: int = config.get("paperWidth", 80)
-        self.connection_config: dict = config.get("connectionConfig", {})
+        self.connection_config: dict[str, Any] = config.get("connectionConfig", {})
         self.status = PrinterStatus.OFFLINE
         self.last_error: Optional[str] = None
         self.last_error_code: Optional[PrinterErrorCode] = None
@@ -80,7 +80,7 @@ class ManagedPrinter:
         else:
             raise ValueError(f"Unsupported connection type: {self.connection_type}")
 
-    async def execute(self, callback) -> None:
+    async def execute(self, callback: Callable[[Usb | Network], None]) -> None:
         """Execute a print operation with lock to prevent concurrent access."""
         async with self._lock:
             if self._escpos is None:
@@ -131,7 +131,7 @@ class ManagedPrinter:
             return PrinterErrorCode.CONNECTION_FAILED
         return PrinterErrorCode.UNKNOWN
 
-    def get_status_dict(self) -> dict:
+    def get_status_dict(self) -> dict[str, Any]:
         return {
             "printerId": self.printer_id,
             "name": self.name,
@@ -149,7 +149,7 @@ class PrinterManager:
     def __init__(self) -> None:
         self._printers: dict[str, ManagedPrinter] = {}
 
-    async def initialize(self, printer_configs: list[dict]) -> None:
+    async def initialize(self, printer_configs: list[dict[str, Any]]) -> None:
         """Initialize printers from backend config dicts and connect them."""
         for cfg in printer_configs:
             printer_id = cfg.get("id", "")
@@ -168,7 +168,7 @@ class PrinterManager:
         connected = sum(1 for r in results if r is True)
         logger.info(f"Printer initialization: {connected}/{len(self._printers)} connected")
 
-    async def reconfigure(self, printer_configs: list[dict]) -> None:
+    async def reconfigure(self, printer_configs: list[dict[str, Any]]) -> None:
         """Update printer configuration based on backend data.
 
         Compares current printers with new config and:
@@ -207,7 +207,7 @@ class PrinterManager:
                 logger.info(f"Added printer '{cfg.get('name')}' ({pid})")
 
     @staticmethod
-    def _config_changed(existing: ManagedPrinter, new_cfg: dict) -> bool:
+    def _config_changed(existing: ManagedPrinter, new_cfg: dict[str, Any]) -> bool:
         """Check if relevant config fields have changed."""
         if existing.name != new_cfg.get("name", ""):
             return True
@@ -225,7 +225,7 @@ class PrinterManager:
     def get_all_printers(self) -> list[ManagedPrinter]:
         return list(self._printers.values())
 
-    def get_all_statuses(self) -> list[dict]:
+    def get_all_statuses(self) -> list[dict[str, Any]]:
         return [p.get_status_dict() for p in self._printers.values()]
 
     async def health_check_all(self) -> None:

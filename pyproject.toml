@@ -32,3 +32,28 @@ python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+# Keine Typstubs vorhanden (oder gar kein echtes Paket, siehe "distro" unten,
+# das nur optional in system_monitor.py importiert wird) - ohne diese
+# Ausnahmen waere jede Verwendung dieser Bibliotheken ein Fehler, obwohl der
+# Code selbst korrekt ist.
+[[tool.mypy.overrides]]
+module = [
+    "yaml",
+    "psutil",
+    "qrcode",
+    "distro",
+    "escpos.*",
+    "socketio",
+    "barcode",
+    "barcode.*",
+]
+ignore_missing_imports = true
+
+# socketio.AsyncClient.event/.on sind selbst ungetypt (siehe oben), daher
+# macht strict's disallow_untyped_decorators aus jedem damit dekorierten
+# Handler einen Fehler, sobald der Handler selbst annotiert ist - das waere
+# das Gegenteil des Ziels dieser Datei. Der Rest der strict-Regeln bleibt an.
+[[tool.mypy.overrides]]
+module = "src.websocket_client"
+disallow_untyped_decorators = false

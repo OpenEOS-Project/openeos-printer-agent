@@ -1,21 +1,22 @@
 import asyncio
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 import socketio
 
 from .config import AppConfig, PrinterConfig
+from .printer_manager import PrinterManager
 from .system_monitor import SystemMonitor
 
 logger = logging.getLogger(__name__)
 
 
-def _build_connection_config(printer: PrinterConfig) -> dict:
+def _build_connection_config(printer: PrinterConfig) -> dict[str, Any]:
     """Build the connection_config dict the backend stores for a printer based
     on the printer's local hardware fields (USB IDs, IP/port). Strips empty
     values so we don't write `null`s to the DB."""
-    cfg: dict = {}
+    cfg: dict[str, Any] = {}
     if printer.connectionType == "usb":
         if printer.usbVendorId:
             cfg["usbVendorId"] = printer.usbVendorId
@@ -37,11 +38,11 @@ class WebSocketClient:
         config: AppConfig,
         device_token: str,
         system_monitor: SystemMonitor,
-        on_print_job: Optional[Callable] = None,
-        on_template_update: Optional[Callable] = None,
-        on_config_update: Optional[Callable] = None,
-        on_cash_drawer: Optional[Callable] = None,
-        on_ready: Optional[Callable] = None,
+        on_print_job: Optional[Callable[..., Any]] = None,
+        on_template_update: Optional[Callable[..., Any]] = None,
+        on_config_update: Optional[Callable[..., Any]] = None,
+        on_cash_drawer: Optional[Callable[..., Any]] = None,
+        on_ready: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._config = config
         self._device_token = device_token
@@ -60,15 +61,15 @@ class WebSocketClient:
             logger=False,
         )
         self._connected = False
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._server_config: dict = {}
+        self._heartbeat_task: Optional[asyncio.Task[None]] = None
+        self._server_config: dict[str, Any] = {}
 
         # Set lazily after PrinterManager is created
-        self._printer_manager = None
+        self._printer_manager: Optional[PrinterManager] = None
 
         self._register_handlers()
 
-    def set_printer_manager(self, printer_manager) -> None:
+    def set_printer_manager(self, printer_manager: PrinterManager) -> None:
         """Set the printer manager after it is initialized."""
         self._printer_manager = printer_manager
 
@@ -76,12 +77,12 @@ class WebSocketClient:
         sio = self._sio
 
         @sio.event
-        async def connect():
+        async def connect() -> None:
             self._connected = True
             logger.info(f"Connected to server: {self._config.server.url}")
 
         @sio.event
-        async def disconnect():
+        async def disconnect() -> None:
             self._connected = False
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
@@ -89,7 +90,7 @@ class WebSocketClient:
             logger.warning("Disconnected from server")
 
         @sio.on("connected")
-        async def on_connected(data):
+        async def on_connected(data: dict[str, Any]) -> None:
             logger.info(f"Server confirmed authentication: {data}")
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             # Let the agent flush unreported job outcomes etc.
@@ -97,11 +98,11 @@ class WebSocketClient:
                 asyncio.create_task(self._on_ready())
 
         @sio.on("error")
-        async def on_error(data):
+        async def on_error(data: dict[str, Any]) -> None:
             logger.error(f"Server error: {data}")
 
         @sio.on("printerJob")
-        async def on_printer_job(data):
+        async def on_printer_job(data: dict[str, Any]) -> dict[str, bool]:
             """The return value is sent back as the socket.io ack — the server
             marks the job PRINTING once we confirm receipt (after the job has
             been persisted to the local store)."""
@@ -112,25 +113,25 @@ class WebSocketClient:
             return {"received": received}
 
         @sio.on("templateUpdate")
-        async def on_template_update(data):
+        async def on_template_update(data: dict[str, Any]) -> None:
             logger.info("Received template update from server")
             if self._on_template_update:
                 await self._on_template_update(data)
 
         @sio.on("openCashDrawer")
-        async def on_open_cash_drawer(data):
+        async def on_open_cash_drawer(data: dict[str, Any]) -> None:
             logger.info(f"Received cash drawer open: printer {data.get('printerId')}")
             if self._on_cash_drawer:
                 await self._on_cash_drawer(data)
 
         @sio.on("printerConfigUpdate")
-        async def on_printer_config_update(data):
+        async def on_printer_config_update(data: dict[str, Any]) -> None:
             logger.info("Received printer config update from server")
             if self._on_config_update:
                 await self._on_config_update(data)
 
         @sio.on("configUpdate")
-        async def on_config_update(data):
+        async def on_config_update(data: dict[str, Any]) -> None:
             """Server can override agent config (e.g., heartbeat interval)."""
             logger.info(f"Received config update: {data}")
             self._server_config = data
@@ -164,7 +165,7 @@ class WebSocketClient:
     def is_connected(self) -> bool:
         return self._connected
 
-    async def fetch_printer_config(self) -> list[dict]:
+    async def fetch_printer_config(self) -> list[dict[str, Any]]:
         """Sync the agent's local printer config (config.yaml) to the backend
         and return the canonical printer descriptors with backend IDs.
 
@@ -206,7 +207,7 @@ class WebSocketClient:
 
         # Map backend IDs back to the printer manager's expected shape.
         id_by_local = {item.get("localId"): item.get("id") for item in synced}
-        printers: list[dict] = []
+        printers: list[dict[str, Any]] = []
         for p in local_printers:
             backend_id = id_by_local.get(p.localId)
             if not backend_id:
@@ -230,7 +231,7 @@ class WebSocketClient:
         logger.info(f"Synced {len(printers)} printer(s) with backend (local config is source of truth)")
         return printers
 
-    async def _legacy_fetch_printer_config(self) -> list[dict]:
+    async def _legacy_fetch_printer_config(self) -> list[dict[str, Any]]:
         """Old GET-based path for installs without local printer config."""
         url = f"{self._config.server.url}/device-api/printers"
         headers = {"x-device-token": self._device_token}

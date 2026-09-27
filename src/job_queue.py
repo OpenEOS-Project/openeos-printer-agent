@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .escpos_renderer import render_to_printer
 from .job_store import JobStore
@@ -14,7 +14,7 @@ RETRY_DELAYS = [2, 10, 30]  # seconds
 MAX_QUEUE_SIZE = 100
 
 
-def _normalize_keys(data: dict) -> dict:
+def _normalize_keys(data: dict[str, Any]) -> dict[str, Any]:
     """Convert camelCase keys to snake_case."""
     import re
 
@@ -22,7 +22,7 @@ def _normalize_keys(data: dict) -> dict:
         s1 = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
         return re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s1).lower()
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         snake_key = to_snake(key)
         if isinstance(value, dict):
@@ -37,11 +37,11 @@ def _normalize_keys(data: dict) -> dict:
 class PrintJob:
     """Internal representation of a print job."""
 
-    def __init__(self, data: dict) -> None:
+    def __init__(self, data: dict[str, Any]) -> None:
         self.job_id: str = data.get("jobId") or data.get("job_id", "unknown")
         self.printer_id: str = data.get("printerId") or data.get("printer_id", "")
         self.template_name: str = data.get("templateName") or data.get("template_name", "receipt")
-        self.payload: dict = data.get("payload") or data.get("data", {})
+        self.payload: dict[str, Any] = data.get("payload") or data.get("data", {})
         self.copies: int = data.get("copies", 1)
         self.attempts: int = 0
         self.status: str = "queued"
@@ -56,8 +56,8 @@ class JobQueue:
         self,
         printer_manager: PrinterManager,
         template_engine: TemplateEngine,
-        on_job_complete: Optional[Callable] = None,
-        on_job_failed: Optional[Callable] = None,
+        on_job_complete: Optional[Callable[..., Any]] = None,
+        on_job_failed: Optional[Callable[..., Any]] = None,
         job_store: Optional[JobStore] = None,
     ) -> None:
         self._printer_manager = printer_manager
@@ -65,9 +65,9 @@ class JobQueue:
         self._on_job_complete = on_job_complete
         self._on_job_failed = on_job_failed
         self._job_store = job_store
-        self._queues: dict[str, asyncio.Queue] = {}
-        self._workers: dict[str, asyncio.Task] = {}
-        self._stats: dict[str, dict] = {}
+        self._queues: dict[str, asyncio.Queue[PrintJob]] = {}
+        self._workers: dict[str, asyncio.Task[None]] = {}
+        self._stats: dict[str, dict[str, int]] = {}
 
     def start_workers(self) -> None:
         """Start a worker task for each configured printer."""
@@ -90,7 +90,7 @@ class JobQueue:
         self._workers.clear()
         logger.info("All print workers stopped")
 
-    async def enqueue(self, job_data: dict, persist: bool = True) -> bool:
+    async def enqueue(self, job_data: dict[str, Any], persist: bool = True) -> bool:
         """Enqueue a print job. Returns False if queue is full or printer unknown.
 
         With a job store attached, the job is persisted before this method
@@ -206,8 +206,16 @@ class JobQueue:
                     {**job.payload, "paper_width": printer.paper_width},
                 )
 
-                # Send to printer
-                await printer.execute(lambda p, r=rendered, o={"copies": job.copies}: render_to_printer(p, r, o))
+                # Send to printer. A named function instead of a lambda here,
+                # because mypy cannot infer parameter types for a lambda that
+                # carries extra defaulted arguments (the r=/o= trick binds the
+                # current `rendered`/`job.copies` by value instead of by the
+                # loop variable's later state) against printer.execute's
+                # Callable[[Usb | Network], None] parameter type.
+                def _do_print(p: Any, r: str = rendered, o: dict[str, Any] = {"copies": job.copies}) -> None:
+                    render_to_printer(p, r, o)
+
+                await printer.execute(_do_print)
 
                 # Success
                 job.status = "completed"
@@ -239,9 +247,9 @@ class JobQueue:
 
                     await self._report_failed(job.job_id, error_code, error_msg)
 
-    def get_queue_stats(self) -> dict:
+    def get_queue_stats(self) -> dict[str, Any]:
         """Get statistics for all printer queues."""
-        result = {}
+        result: dict[str, Any] = {}
         for printer_id, stats in self._stats.items():
             queue = self._queues.get(printer_id)
             result[printer_id] = {

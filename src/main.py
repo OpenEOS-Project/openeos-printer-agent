@@ -3,6 +3,7 @@ import asyncio
 import logging
 import signal
 from pathlib import Path
+from typing import Any
 
 from .config import load_config
 from .device_registrar import DeviceRegistrar
@@ -35,13 +36,13 @@ class PrinterAgent:
         self._job_store: JobStore | None = None
         self._ws_client: WebSocketClient | None = None
         self._local_server: LocalServer | None = None
-        self._health_check_task: asyncio.Task | None = None
+        self._health_check_task: asyncio.Task[None] | None = None
 
         # Jobs the backend replays immediately on (re)connect can arrive before
         # the job queue + workers exist (connect happens several startup steps
         # before the queue is built). Buffer them here and drain once the queue
         # is live so replayed jobs are never silently dropped.
-        self._early_jobs: list[dict] = []
+        self._early_jobs: list[dict[str, Any]] = []
         self._accepting_jobs = False
 
     async def start(self) -> None:
@@ -174,7 +175,7 @@ class PrinterAgent:
             except Exception as e:
                 logger.error(f"Health check error: {e}")
 
-    async def _handle_print_job(self, data: dict) -> bool:
+    async def _handle_print_job(self, data: dict[str, Any]) -> bool:
         """Callback when a print job is received via WebSocket.
 
         The return value becomes the socket.io ack: True only after the job
@@ -220,14 +221,14 @@ class PrinterAgent:
                 self._job_store.remove(job_id)
                 logger.info(f"Delivered stored outcome for job {job_id}")
 
-    async def _handle_template_update(self, data: dict) -> None:
+    async def _handle_template_update(self, data: dict[str, Any]) -> None:
         """Callback when templates are updated via WebSocket."""
         if self._template_engine and isinstance(data, dict):
             templates = data.get("templates", {})
             if templates:
                 self._template_engine.update_server_templates(templates)
 
-    async def _handle_cash_drawer(self, data: dict) -> None:
+    async def _handle_cash_drawer(self, data: dict[str, Any]) -> None:
         """Callback when an openCashDrawer event is received via WebSocket."""
         if not self._printer_manager:
             return
@@ -249,7 +250,7 @@ class PrinterAgent:
         except Exception as e:
             logger.error(f"Failed to open cash drawer on printer {printer_id}: {e}")
 
-    async def _handle_config_update(self, data: dict) -> None:
+    async def _handle_config_update(self, data: dict[str, Any]) -> None:
         """Callback when printerConfigUpdate is received via WebSocket.
 
         Re-fetches printer config from backend and reconfigures PrinterManager.
@@ -349,7 +350,7 @@ class PrinterAgent:
         # Wait for shutdown
         loop = asyncio.get_event_loop()
 
-        def _signal_handler():
+        def _signal_handler() -> None:
             self._shutdown_event.set()
 
         for sig in (signal.SIGTERM, signal.SIGINT):

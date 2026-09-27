@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
@@ -9,7 +10,7 @@ BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "templates"
 
 
-def _filter_strftime(value, fmt: str = "%d.%m.%Y %H:%M") -> str:
+def _filter_strftime(value: Any, fmt: str = "%d.%m.%Y %H:%M") -> str:
     """Format a datetime string or object."""
     if isinstance(value, str):
         from datetime import datetime
@@ -25,19 +26,19 @@ def _filter_strftime(value, fmt: str = "%d.%m.%Y %H:%M") -> str:
         except ValueError:
             return value
     if hasattr(value, "strftime"):
-        return value.strftime(fmt)
+        return str(value.strftime(fmt))
     return str(value)
 
 
-def _filter_rjust(value, width: int, fillchar: str = " ") -> str:
+def _filter_rjust(value: Any, width: int, fillchar: str = " ") -> str:
     return str(value).rjust(width, fillchar)
 
 
-def _filter_center(value, width: int, fillchar: str = " ") -> str:
+def _filter_center(value: Any, width: int, fillchar: str = " ") -> str:
     return str(value).center(width, fillchar)
 
 
-def _filter_currency(value, symbol: str = "EUR", decimals: int = 2) -> str:
+def _filter_currency(value: Any, symbol: str = "EUR", decimals: int = 2) -> str:
     """Format a number as currency."""
     try:
         num = float(value)
@@ -97,7 +98,7 @@ class TemplateEngine:
             except Exception as e:
                 logger.warning(f"Failed to load cached template {name}: {e}")
 
-    def render(self, template_name: str, data: dict) -> str:
+    def render(self, template_name: str, data: dict[str, Any]) -> str:
         """Render a template with data using the fallback chain."""
         # 1. Server templates (memory)
         if template_name in self._server_templates:
