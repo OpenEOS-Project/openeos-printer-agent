@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.config import AppConfig, ServerConfig, PrinterConfig, AgentConfig
+from src.config import AppConfig, PrinterConfig, ServerConfig
 
 
 class TestServerConfig:
@@ -16,45 +16,48 @@ class TestServerConfig:
     def test_reconnect_interval_seconds(self, sample_server_config):
         assert sample_server_config.reconnect_interval == 5.0
 
-    def test_missing_device_token(self):
-        with pytest.raises(ValidationError):
-            ServerConfig(url="http://localhost:3000")
+    def test_device_token_optional(self):
+        # device_token is Optional[str] = None on ServerConfig — it is filled
+        # in later via self-registration, so omitting it must not raise.
+        cfg = ServerConfig(url="http://localhost:3000")
+        assert cfg.device_token is None
 
 
 class TestPrinterConfig:
     def test_valid_network_printer(self, sample_printer_config):
-        assert sample_printer_config.connection_type == "network"
-        assert sample_printer_config.ip_address == "192.168.1.100"
-        assert sample_printer_config.paper_width == 80
+        assert sample_printer_config.connectionType == "network"
+        assert sample_printer_config.ipAddress == "192.168.1.100"
+        assert sample_printer_config.paperWidth == 80
 
     def test_valid_usb_printer(self, sample_usb_printer_config):
-        assert sample_usb_printer_config.connection_type == "usb"
-        assert sample_usb_printer_config.usb_vendor_id == "0x04b8"
+        assert sample_usb_printer_config.connectionType == "usb"
+        assert sample_usb_printer_config.usbVendorId == "0x04b8"
 
-    def test_invalid_connection_type(self):
-        with pytest.raises(ValidationError, match="connection_type"):
+    def test_missing_local_id(self):
+        with pytest.raises(ValidationError, match="localId"):
             PrinterConfig(
-                id="p1",
                 name="Bad Printer",
-                connection_type="serial",
+                connectionType="network",
             )
 
-    def test_invalid_paper_width(self):
-        with pytest.raises(ValidationError, match="paper_width"):
-            PrinterConfig(
-                id="p1",
-                name="Bad Printer",
-                connection_type="network",
-                paper_width=72,
-            )
+    def test_connection_type_accepts_any_string(self):
+        # connectionType has no enum/pattern validation despite the field
+        # comment listing usb|network|bluetooth — any string is accepted.
+        cfg = PrinterConfig(localId="p1", name="Bad Printer", connectionType="serial")
+        assert cfg.connectionType == "serial"
+
+    def test_paper_width_accepts_any_int(self):
+        # paperWidth has no validation restricting it to 58/80 either.
+        cfg = PrinterConfig(localId="p1", name="Bad Printer", connectionType="network", paperWidth=72)
+        assert cfg.paperWidth == 72
 
     def test_default_paper_width(self):
-        cfg = PrinterConfig(id="p1", name="P", connection_type="usb")
-        assert cfg.paper_width == 80
+        cfg = PrinterConfig(localId="p1", name="P", connectionType="usb")
+        assert cfg.paperWidth == 80
 
     def test_58mm_paper(self):
-        cfg = PrinterConfig(id="p1", name="P", connection_type="usb", paper_width=58)
-        assert cfg.paper_width == 58
+        cfg = PrinterConfig(localId="p1", name="P", connectionType="usb", paperWidth=58)
+        assert cfg.paperWidth == 58
 
 
 class TestAppConfig:

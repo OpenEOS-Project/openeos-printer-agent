@@ -44,8 +44,7 @@ class JobStore:
         """Persist a newly received job. Returns False if the job_id is
         already known (duplicate delivery, e.g. server replay)."""
         cur = self._conn.execute(
-            "INSERT OR IGNORE INTO jobs (job_id, data, status, created_at) "
-            "VALUES (?, ?, 'pending', ?)",
+            "INSERT OR IGNORE INTO jobs (job_id, data, status, created_at) VALUES (?, ?, 'pending', ?)",
             (job_id, json.dumps(data), time.time()),
         )
         self._conn.commit()
@@ -65,17 +64,14 @@ class JobStore:
         """Record a finished job whose outcome has not reached the server yet
         (status: 'completed' or 'failed')."""
         self._conn.execute(
-            "UPDATE jobs SET status = ?, error_code = ?, error_message = ? "
-            "WHERE job_id = ?",
+            "UPDATE jobs SET status = ?, error_code = ?, error_message = ? WHERE job_id = ?",
             (status, error_code, error_message, job_id),
         )
         self._conn.commit()
 
     def get_pending(self) -> list[dict]:
         """Job payloads that were received but never finished (re-enqueue on start)."""
-        rows = self._conn.execute(
-            "SELECT data FROM jobs WHERE status = 'pending' ORDER BY created_at ASC"
-        ).fetchall()
+        rows = self._conn.execute("SELECT data FROM jobs WHERE status = 'pending' ORDER BY created_at ASC").fetchall()
         jobs = []
         for row in rows:
             try:

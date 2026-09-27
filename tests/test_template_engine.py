@@ -1,6 +1,6 @@
 import pytest
 
-from src.template_engine import TemplateEngine, _filter_strftime, _filter_currency
+from src.template_engine import TemplateEngine, _filter_currency, _filter_strftime
 
 
 class TestFilters:
@@ -37,7 +37,7 @@ class TestTemplateEngine:
 
     def test_render_kitchen(self, sample_kitchen_job):
         engine = TemplateEngine()
-        result = engine.render("kitchen", {**sample_kitchen_job["payload"], "paper_width": 80})
+        result = engine.render("kitchen_ticket", {**sample_kitchen_job["payload"], "paper_width": 80})
         assert "KUECHE" in result
         assert "#42" in result
         assert "Bratwurst" in result
@@ -46,7 +46,7 @@ class TestTemplateEngine:
 
     def test_render_order(self, sample_print_job):
         engine = TemplateEngine()
-        result = engine.render("order", {**sample_print_job["payload"], "paper_width": 80})
+        result = engine.render("order_ticket", {**sample_print_job["payload"], "paper_width": 80})
         assert "BESTELLUNG" in result
 
     def test_render_pickup(self, sample_print_job):
@@ -60,8 +60,8 @@ class TestTemplateEngine:
         engine = TemplateEngine()
         templates = engine.get_available_templates()
         assert "receipt" in templates
-        assert "kitchen" in templates
-        assert "order" in templates
+        assert "kitchen_ticket" in templates
+        assert "order_ticket" in templates
         assert "pickup" in templates
 
     def test_missing_template(self):
@@ -71,17 +71,21 @@ class TestTemplateEngine:
 
     def test_server_template_override(self):
         engine = TemplateEngine()
-        engine.update_server_templates({
-            "custom": "Hello {{ name }}!",
-        })
+        engine.update_server_templates(
+            {
+                "custom": "Hello {{ name }}!",
+            }
+        )
         result = engine.render("custom", {"name": "World"})
         assert result == "Hello World!"
 
     def test_server_template_takes_priority(self):
         engine = TemplateEngine()
-        engine.update_server_templates({
-            "receipt": "Custom receipt for {{ organization.name }}",
-        })
+        engine.update_server_templates(
+            {
+                "receipt": "Custom receipt for {{ organization.name }}",
+            }
+        )
         result = engine.render("receipt", {"organization": {"name": "Test"}})
         assert result == "Custom receipt for Test"
 

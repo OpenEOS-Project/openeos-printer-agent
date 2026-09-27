@@ -5,16 +5,16 @@ import signal
 from pathlib import Path
 
 from .config import load_config
-from .version import __version__
-from .utils import setup_logging
-from .system_monitor import SystemMonitor
 from .device_registrar import DeviceRegistrar
-from .printer_manager import PrinterManager
-from .template_engine import TemplateEngine
 from .job_queue import JobQueue
 from .job_store import JobStore
-from .websocket_client import WebSocketClient
 from .local_server import LocalServer
+from .printer_manager import PrinterManager
+from .system_monitor import SystemMonitor
+from .template_engine import TemplateEngine
+from .utils import setup_logging
+from .version import __version__
+from .websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class PrinterAgent:
         if config.sentry.enabled and config.sentry.dsn:
             try:
                 import sentry_sdk
+
                 sentry_sdk.init(
                     dsn=config.sentry.dsn,
                     environment=config.sentry.environment,
@@ -127,9 +128,7 @@ class PrinterAgent:
         logger.info(f"Templates available: {self._template_engine.get_available_templates()}")
 
         # 12. Job Store (crash-safe queue persistence) + Job Queue
-        job_store_path = config.job_store_file or str(
-            Path(config.device_token_file).parent / "print-jobs.db"
-        )
+        job_store_path = config.job_store_file or str(Path(config.device_token_file).parent / "print-jobs.db")
         try:
             self._job_store = JobStore(job_store_path)
         except Exception as e:
@@ -186,9 +185,7 @@ class PrinterAgent:
         # Arrived before the queue/workers are ready (backend replays queued
         # jobs immediately on connect). Buffer and drain once the queue is up,
         # acking as accepted since the job will be processed.
-        logger.info(
-            f"Buffering print job {data.get('jobId', 'unknown')} until queue is ready"
-        )
+        logger.info(f"Buffering print job {data.get('jobId', 'unknown')} until queue is ready")
         self._early_jobs.append(data)
         return True
 
@@ -353,13 +350,15 @@ class PrinterAgent:
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenEOS Printer Agent")
     parser.add_argument(
-        "--config", "-c",
+        "--config",
+        "-c",
         type=str,
         default=None,
         help="Path to config.yaml",
     )
     parser.add_argument(
-        "--version", "-v",
+        "--version",
+        "-v",
         action="version",
         version=f"openeos-printer-agent {__version__}",
     )

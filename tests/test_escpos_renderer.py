@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock, call
-import pytest
 
-from src.escpos_renderer import render_to_printer, _handle_tag
+from src.escpos_renderer import _handle_tag, render_to_printer
 
 
 class TestRenderToPrinter:
@@ -27,8 +26,11 @@ class TestRenderToPrinter:
     def test_big_tag(self):
         printer = self._make_printer()
         render_to_printer(printer, "{{BIG}}Big text{{/BIG}}")
-        printer.set.assert_any_call(width=2, height=2)
-        printer.set.assert_any_call(width=1, height=1)
+        # BIG/ /BIG use python-escpos's native double-width/height flags and
+        # the normal_textsize reset, not the width=/height= kwargs (those are
+        # silent no-ops without custom_size=True).
+        printer.set.assert_any_call(double_width=True, double_height=True)
+        printer.set.assert_any_call(normal_textsize=True)
 
     def test_underline_tag(self):
         printer = self._make_printer()
@@ -68,7 +70,12 @@ class TestRenderToPrinter:
     def test_barcode_tag(self):
         printer = self._make_printer()
         render_to_printer(printer, "{{BARCODE:12345}}")
-        printer.barcode.assert_called_once_with("12345", "CODE128", function_type="B")
+        # python-barcode is installed transitively (python-escpos depends on
+        # it), so barcodes render as a bitmap via printer.image(), not the
+        # native printer.barcode() GS-k command. The native path is only a
+        # fallback used when python-barcode is unavailable.
+        printer.image.assert_called_once()
+        assert printer.barcode.call_count == 0
 
     def test_multiple_copies(self):
         printer = self._make_printer()

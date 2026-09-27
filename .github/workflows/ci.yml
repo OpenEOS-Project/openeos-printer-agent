@@ -1,0 +1,93 @@
+name: Tests und Codepruefung
+
+# Der Agent hatte bisher keine CI, obwohl pytest, ruff und mypy in
+# pyproject.toml konfiguriert sind und Tests existieren. Die Folge war
+# absehbar: Die Tests waren reihenweise rot, weil ein Feld im Konfigurations-
+# modell umbenannt und Vorlagen umbenannt wurden, ohne dass es jemand
+# bemerkte. Genau dagegen laeuft dieser Workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 ist die dokumentierte Mindestversion, 3.12 faengt fruehzeitig
+        # ab, was beim naechsten Sprung auf den Raspberry Pis kaputtginge.
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Tests
+        run: python -m pytest -q --cov=src --cov-report=term-missing
+
+  lint:
+    name: Codepruefung
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Werkzeuge installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: ruff
+        run: python -m ruff check .
+
+      - name: ruff format
+        run: python -m ruff format --check .
+
+      # Nicht blockierend: Der Bestand ist noch nicht vollstaendig annotiert,
+      # und ein rotes Gate am ersten Tag wuerde nur dazu fuehren, dass die
+      # Pruefung abgeschaltet statt aufgeraeumt wird. Der Bericht steht im
+      # Protokoll und kann scharf gestellt werden, sobald er sauber ist.
+      - name: mypy (nur Bericht)
+        run: python -m mypy src || true
+
+  docker:
+    name: Abbild baut
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Abbild bauen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Bewusst nur bauen, nicht veroeffentlichen: Der Agent wird auf den
+          # Geraeten aus dem Quelltext installiert, nicht aus einem Registry.
+          push: false

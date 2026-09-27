@@ -3,8 +3,8 @@ import logging
 import re
 from typing import Optional
 
-from PIL import Image
 import qrcode
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 #
 # Legacy `{{X}}` markup is still recognized so cached / older server templates
 # keep working — but new templates SHOULD emit `<<X>>`.
-TAG_PATTERN = re.compile(
-    r"<<(/?\w+)(?::([^>]*))?>>|\{\{(/?\w+)(?::([^}]*))?\}\}"
-)
+TAG_PATTERN = re.compile(r"<<(/?\w+)(?::([^>]*))?>>|\{\{(/?\w+)(?::([^}]*))?\}\}")
 
 
 def render_to_printer(printer, text: str, options: Optional[dict] = None) -> None:
@@ -90,7 +88,7 @@ def _process_line(printer, line: str) -> None:
             text_buffer += line[pos:]
             break
 
-        text_buffer += line[pos:match.start()]
+        text_buffer += line[pos : match.start()]
 
         # Group 1/2 = angle-bracket markup, group 3/4 = legacy curly markup.
         tag = match.group(1) or match.group(3)
@@ -229,12 +227,14 @@ def _print_software_barcode(printer, bc_type: str, value: str) -> None:
         # python-barcode names: "code128", "code39", "ean13", ...
         cls = get_barcode_class(cls_name) if cls_name else get_barcode_class("code128")
         bc = cls(value, writer=ImageWriter())
-        img = bc.render(writer_options={
-            "write_text": False,     # suppress text below bars (we print our own)
-            "module_height": 8.0,    # 8 mm tall bars — readable + ~30% less data
-            "module_width": 0.25,    # ~2 dots/module @ 203dpi; 36-char UUID fits 80mm
-            "quiet_zone": 2.0,
-        })
+        img = bc.render(
+            writer_options={
+                "write_text": False,  # suppress text below bars (we print our own)
+                "module_height": 8.0,  # 8 mm tall bars — readable + ~30% less data
+                "module_width": 0.25,  # ~2 dots/module @ 203dpi; 36-char UUID fits 80mm
+                "quiet_zone": 2.0,
+            }
+        )
         # Try fastest impl first; fall back if the printer profile rejects it.
         for impl in ("graphics", "bitImageRaster", "bitImageColumn"):
             try:

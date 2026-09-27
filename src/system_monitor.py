@@ -113,6 +113,7 @@ class SystemMonitor:
     def _get_os_version(self) -> str:
         try:
             import distro
+
             return f"{distro.name()} {distro.version()}"
         except ImportError:
             return f"{platform.system()} {platform.release()}"

@@ -271,9 +271,7 @@ class WebSocketClient:
                 result = await resp.json()
                 # API wraps responses in {"data": {...}} — accept both that and the bare shape.
                 payload = result.get("data", result) if isinstance(result, dict) else result
-                templates = (
-                    payload.get("templates", {}) if isinstance(payload, dict) else {}
-                )
+                templates = payload.get("templates", {}) if isinstance(payload, dict) else {}
                 logger.info(f"Fetched {len(templates)} template(s) from backend")
                 return templates
 
@@ -298,21 +296,27 @@ class WebSocketClient:
         if self._printer_manager:
             # Send heartbeat per printer (matches backend PrinterHeartbeatEvent)
             for printer in self._printer_manager.get_all_printers():
-                await self._sio.emit("printerHeartbeat", {
-                    "printerId": printer.printer_id,
-                    "agentId": agent_id,
-                    "isOnline": printer.status.value in ("online", "busy"),
-                })
+                await self._sio.emit(
+                    "printerHeartbeat",
+                    {
+                        "printerId": printer.printer_id,
+                        "agentId": agent_id,
+                        "isOnline": printer.status.value in ("online", "busy"),
+                    },
+                )
 
             # Also send system info periodically
             try:
                 sys_info = await self._system_monitor.get_system_info()
-                await self._sio.emit("agentHeartbeat", {
-                    "agentId": agent_id,
-                    "agentName": self._config.agent.name,
-                    "printers": self._printer_manager.get_all_statuses(),
-                    "system": sys_info,
-                })
+                await self._sio.emit(
+                    "agentHeartbeat",
+                    {
+                        "agentId": agent_id,
+                        "agentName": self._config.agent.name,
+                        "printers": self._printer_manager.get_all_statuses(),
+                        "system": sys_info,
+                    },
+                )
             except Exception as e:
                 logger.debug(f"Failed to collect system info for heartbeat: {e}")
 
@@ -325,10 +329,13 @@ class WebSocketClient:
         if not self._connected:
             return False
         try:
-            await self._sio.emit("printerJobComplete", {
-                "jobId": job_id,
-                "agentId": self._config.agent.id,
-            })
+            await self._sio.emit(
+                "printerJobComplete",
+                {
+                    "jobId": job_id,
+                    "agentId": self._config.agent.id,
+                },
+            )
             logger.debug(f"Reported job {job_id} complete")
             return True
         except Exception as e:
@@ -340,12 +347,15 @@ class WebSocketClient:
         if not self._connected:
             return False
         try:
-            await self._sio.emit("printerJobFailed", {
-                "jobId": job_id,
-                "agentId": self._config.agent.id,
-                "errorCode": error_code,
-                "errorMessage": error_message,
-            })
+            await self._sio.emit(
+                "printerJobFailed",
+                {
+                    "jobId": job_id,
+                    "agentId": self._config.agent.id,
+                    "errorCode": error_code,
+                    "errorMessage": error_message,
+                },
+            )
             logger.debug(f"Reported job {job_id} failed: {error_code}")
             return True
         except Exception as e:

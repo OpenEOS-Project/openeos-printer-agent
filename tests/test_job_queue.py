@@ -1,11 +1,11 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
-from src.config import PrinterConfig
-from src.printer_manager import PrinterManager, ManagedPrinter, PrinterStatus
-from src.template_engine import TemplateEngine
 from src.job_queue import JobQueue, PrintJob, _normalize_keys
+from src.printer_manager import ManagedPrinter, PrinterManager, PrinterStatus
+from src.template_engine import TemplateEngine
 
 
 class TestNormalizeKeys:
@@ -52,12 +52,24 @@ class TestPrintJob:
 
 class TestJobQueue:
     @pytest.fixture
-    def printer_manager(self, sample_printer_config):
-        pm = PrinterManager([sample_printer_config])
-        # Mock the printer as connected
-        printer = pm.get_printer("printer-001")
+    def printer_manager(self):
+        # PrinterManager() takes no args; initialize() is async and would
+        # attempt a real hardware connection, so build a connected printer
+        # directly instead. ManagedPrinter takes the raw backend-shaped dict
+        # (camelCase "id"/"connectionType"/"paperWidth"), not a PrinterConfig.
+        pm = PrinterManager()
+        printer = ManagedPrinter(
+            {
+                "id": "printer-001",
+                "name": "Test Printer",
+                "connectionType": "network",
+                "paperWidth": 80,
+                "connectionConfig": {"ipAddress": "192.168.1.100", "port": 9100},
+            }
+        )
         printer.status = PrinterStatus.ONLINE
         printer._escpos = MagicMock()
+        pm._printers[printer.printer_id] = printer
         return pm
 
     @pytest.fixture
@@ -89,12 +101,14 @@ class TestJobQueue:
     async def test_enqueue_unknown_printer(self, job_queue):
         job_queue.start_workers()
         try:
-            result = await job_queue.enqueue({
-                "jobId": "job-x",
-                "printerId": "unknown-printer",
-                "templateName": "receipt",
-                "payload": {},
-            })
+            result = await job_queue.enqueue(
+                {
+                    "jobId": "job-x",
+                    "printerId": "unknown-printer",
+                    "templateName": "receipt",
+                    "payload": {},
+                }
+            )
             assert result is False
         finally:
             await job_queue.stop_workers()
@@ -120,19 +134,19 @@ class TestJobQueue:
         )
         jq.start_workers()
         try:
-            await jq.enqueue({
-                "jobId": "job-x",
-                "printerId": "nonexistent",
-                "payload": {},
-            })
+            await jq.enqueue(
+                {
+                    "jobId": "job-x",
+                    "printerId": "nonexistent",
+                    "payload": {},
+                }
+            )
             on_failed.assert_awaited_once()
         finally:
             await jq.stop_workers()
 
     @pytest.mark.asyncio
-    async def test_worker_reports_failure_for_unexpected_exception(
-        self, job_queue, sample_print_job
-    ):
+    async def test_worker_reports_failure_for_unexpected_exception(self, job_queue, sample_print_job):
         # A bug anywhere _process_job doesn't already handle (not just the
         # printer-not-found/queue-full cases it classifies itself) must still
         # surface as a reported failure, not vanish silently with the job
@@ -141,13 +155,9 @@ class TestJobQueue:
         job_queue._on_job_failed = on_failed
         job_queue.start_workers()
         try:
-            with patch.object(
-                job_queue, "_process_job", side_effect=RuntimeError("boom")
-            ):
+            with patch.object(job_queue, "_process_job", side_effect=RuntimeError("boom")):
                 await job_queue.enqueue(sample_print_job)
-                await asyncio.wait_for(
-                    job_queue._queues["printer-001"].join(), timeout=2
-                )
+                await asyncio.wait_for(job_queue._queues["printer-001"].join(), timeout=2)
             on_failed.assert_awaited_once()
             args = on_failed.call_args.args
             assert args[1] == "WORKER_ERROR"

@@ -1,9 +1,7 @@
-import json
 import logging
 from pathlib import Path
-from typing import Optional
 
-from jinja2 import Environment, FileSystemLoader, BaseLoader, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +13,7 @@ def _filter_strftime(value, fmt: str = "%d.%m.%Y %H:%M") -> str:
     """Format a datetime string or object."""
     if isinstance(value, str):
         from datetime import datetime
+
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
             # Timestamps arrive in UTC (…Z); convert to the agent's local time
@@ -112,9 +111,7 @@ class TemplateEngine:
         except TemplateNotFound:
             pass
 
-        raise TemplateNotFound(
-            f"Template '{template_name}' not found in server templates, cache, or built-in defaults"
-        )
+        raise TemplateNotFound(f"Template '{template_name}' not found in server templates, cache, or built-in defaults")
 
     def update_server_templates(self, templates: dict[str, str]) -> None:
         """Update server templates in memory and persist to disk cache."""

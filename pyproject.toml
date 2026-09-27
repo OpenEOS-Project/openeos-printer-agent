@@ -21,6 +21,12 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+# Die Statusseite traegt ihr HTML und CSS als Zeichenketten im Quelltext.
+# Die auf 120 Zeichen umzubrechen macht den Code nicht lesbarer, sondern
+# zerlegt Markup an willkuerlichen Stellen.
+"src/local_server.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
