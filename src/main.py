@@ -266,11 +266,23 @@ class PrinterAgent:
             # are discarded, but pending jobs survive in the job store and are
             # re-enqueued below.
             if self._job_queue:
+                # _template_engine wird in start() gesetzt, bevor _job_queue
+                # je einen Wert bekommt (Schritt 11 vor Schritt 12), und
+                # danach nie wieder auf None zurückgesetzt. Ist _job_queue
+                # hier gesetzt, MUSS _template_engine es also auch sein - die
+                # explizite Prüfung macht das für mypy sichtbar und wandelt
+                # eine sonst stille Annahme in einen lauten Fehler, falls die
+                # Startreihenfolge sich je ändert, statt erst beim Rendern
+                # eines Druckjobs mit einem fehlenden Template zu crashen.
+                template_engine = self._template_engine
+                if template_engine is None:
+                    raise RuntimeError("Template engine not initialized; cannot rebuild job queue")
+
                 self._accepting_jobs = False
                 await self._job_queue.stop_workers()
                 self._job_queue = JobQueue(
                     printer_manager=self._printer_manager,
-                    template_engine=self._template_engine,
+                    template_engine=template_engine,
                     on_job_complete=self._ws_client.report_job_complete,
                     on_job_failed=self._ws_client.report_job_failed,
                     job_store=self._job_store,
