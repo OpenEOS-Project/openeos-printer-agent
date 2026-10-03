@@ -36,8 +36,15 @@ Kunde: {{ customer_name }}
 {% if subtotal is defined %}
 {{ "Zwischensumme:".ljust(cols - 12) }}{{ subtotal|currency|rjust(12) }}
 {% endif %}
-{% if tax_amount is defined %}
-{{ ("MwSt " ~ tax_rate|default("19") ~ "%:").ljust(cols - 12) }}{{ tax_amount|currency|rjust(12) }}
+{# Preise sind brutto: ausgewiesen wird die enthaltene MwSt, je Satz eine
+   Zeile. Bei gemischten Saetzen schickt die API keinen `tax_rate` — die alte
+   Einzelzeile haette dann pauschal "19%" neben die Gesamtsumme geschrieben. #}
+{% if tax_lines is defined and tax_lines %}
+{% for tl in tax_lines %}
+{{ ("enth. MwSt " ~ (tl.rate|int if tl.rate == tl.rate|int else tl.rate) ~ "%:").ljust(cols - 12) }}{{ tl.tax|currency|rjust(12) }}
+{% endfor %}
+{% elif tax_amount is defined %}
+{{ ("enth. MwSt " ~ tax_rate|default("19") ~ "%:").ljust(cols - 12) }}{{ tax_amount|currency|rjust(12) }}
 {% endif %}
 <<BOLD>>{{ "GESAMT:".ljust(cols - 12) }}{{ total|default(0)|currency|rjust(12) }}<</BOLD>>
 {{ line }}
