@@ -68,12 +68,11 @@ jobs:
       - name: ruff format
         run: python -m ruff format --check .
 
-      # Nicht blockierend: Der Bestand ist noch nicht vollstaendig annotiert,
-      # und ein rotes Gate am ersten Tag wuerde nur dazu fuehren, dass die
-      # Pruefung abgeschaltet statt aufgeraeumt wird. Der Bericht steht im
-      # Protokoll und kann scharf gestellt werden, sobald er sauber ist.
-      - name: mypy (nur Bericht)
-        run: python -m mypy src || true
+      # Blockierend seit #8: der Bestand ist jetzt vollstaendig annotiert
+      # (0 Fehler), also faengt das Gate ab jetzt echte Regressionen ab,
+      # statt sie nur zu protokollieren.
+      - name: mypy
+        run: python -m mypy src
 
   docker:
     name: Abbild baut

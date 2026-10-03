@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from typing import Any
 
 import psutil
 
@@ -15,12 +16,12 @@ logger = logging.getLogger(__name__)
 class SystemMonitor:
     """Collects system metrics for heartbeat reporting."""
 
-    async def get_system_info(self) -> dict:
+    async def get_system_info(self) -> dict[str, Any]:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._collect)
 
-    def _collect(self) -> dict:
-        info: dict = {
+    def _collect(self) -> dict[str, Any]:
+        info: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "agent_version": __version__,
             "python_version": platform.python_version(),
@@ -41,11 +42,11 @@ class SystemMonitor:
             if temps:
                 for name in ("coretemp", "cpu_thermal", "cpu-thermal"):
                     if name in temps and temps[name]:
-                        return temps[name][0].current
+                        return float(temps[name][0].current)
                 # Fallback: first available sensor
                 first_key = next(iter(temps))
                 if temps[first_key]:
-                    return temps[first_key][0].current
+                    return float(temps[first_key][0].current)
         except (AttributeError, StopIteration):
             pass
 
@@ -58,7 +59,7 @@ class SystemMonitor:
 
         return None
 
-    def _get_memory(self) -> dict:
+    def _get_memory(self) -> dict[str, Any]:
         mem = psutil.virtual_memory()
         return {
             "total_mb": round(mem.total / (1024 * 1024)),
@@ -66,7 +67,7 @@ class SystemMonitor:
             "percent": mem.percent,
         }
 
-    def _get_disk(self) -> dict:
+    def _get_disk(self) -> dict[str, Any]:
         usage = shutil.disk_usage("/")
         return {
             "total_gb": round(usage.total / (1024**3), 1),
@@ -77,8 +78,8 @@ class SystemMonitor:
     def _get_uptime(self) -> int:
         return int(psutil.time.time() - psutil.boot_time())
 
-    def _get_network(self) -> dict:
-        info: dict = {"ip_address": None, "wifi_ssid": None}
+    def _get_network(self) -> dict[str, Any]:
+        info: dict[str, Any] = {"ip_address": None, "wifi_ssid": None}
 
         # Get primary IP
         try:

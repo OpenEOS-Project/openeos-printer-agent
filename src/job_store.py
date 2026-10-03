@@ -3,7 +3,7 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class JobStore:
         self._conn.commit()
         logger.info(f"Job store ready: {path}")
 
-    def add(self, job_id: str, data: dict) -> bool:
+    def add(self, job_id: str, data: dict[str, Any]) -> bool:
         """Persist a newly received job. Returns False if the job_id is
         already known (duplicate delivery, e.g. server replay)."""
         cur = self._conn.execute(
@@ -69,7 +69,7 @@ class JobStore:
         )
         self._conn.commit()
 
-    def get_pending(self) -> list[dict]:
+    def get_pending(self) -> list[dict[str, Any]]:
         """Job payloads that were received but never finished (re-enqueue on start)."""
         rows = self._conn.execute("SELECT data FROM jobs WHERE status = 'pending' ORDER BY created_at ASC").fetchall()
         jobs = []
@@ -80,7 +80,7 @@ class JobStore:
                 logger.warning("Dropping corrupt persisted job payload")
         return jobs
 
-    def get_unreported(self) -> list[dict]:
+    def get_unreported(self) -> list[dict[str, Any]]:
         """Finished jobs whose outcome still has to be reported to the server."""
         rows = self._conn.execute(
             "SELECT job_id, status, error_code, error_message FROM jobs "

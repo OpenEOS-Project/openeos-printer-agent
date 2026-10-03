@@ -1,7 +1,7 @@
 import io
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import qrcode
 from PIL import Image
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 TAG_PATTERN = re.compile(r"<<(/?\w+)(?::([^>]*))?>>|\{\{(/?\w+)(?::([^}]*))?\}\}")
 
 
-def render_to_printer(printer, text: str, options: Optional[dict] = None) -> None:
+def render_to_printer(printer: Any, text: str, options: Optional[dict[str, Any]] = None) -> None:
     """Render markup text to an ESC/POS printer.
 
     Translates markup tags to ESC/POS commands. Runs synchronously
@@ -39,7 +39,7 @@ def render_to_printer(printer, text: str, options: Optional[dict] = None) -> Non
         _render_text(printer, text)
 
 
-def _render_text(printer, text: str) -> None:
+def _render_text(printer: Any, text: str) -> None:
     """Process text line by line, handling markup tags."""
     lines = text.split("\n")
     buffer = ""
@@ -59,7 +59,7 @@ def _render_text(printer, text: str) -> None:
         _process_line(printer, stripped)
 
 
-def _process_line(printer, line: str) -> None:
+def _process_line(printer: Any, line: str) -> None:
     """Process a single line, executing tags and printing text.
 
     Flush semantics:
@@ -120,7 +120,7 @@ def _process_line(printer, line: str) -> None:
         printer.text("\n")
 
 
-def _handle_tag(printer, tag: str, arg: Optional[str]) -> bool:
+def _handle_tag(printer: Any, tag: str, arg: Optional[str]) -> bool:
     """Handle a single markup tag. Returns True if tag was a block command."""
     try:
         if tag == "BOLD":
@@ -201,7 +201,7 @@ def _handle_tag(printer, tag: str, arg: Optional[str]) -> bool:
     return False
 
 
-def _print_software_barcode(printer, bc_type: str, value: str) -> None:
+def _print_software_barcode(printer: Any, bc_type: str, value: str) -> None:
     """Render a barcode as a bitmap and print it.
 
     We use python-barcode directly (rather than python-escpos's built-in
@@ -251,7 +251,7 @@ def _print_software_barcode(printer, bc_type: str, value: str) -> None:
         logger.error(f"Software barcode rendering failed for {bc_type}={value!r}: {e}")
 
 
-def _print_qrcode(printer, data: str) -> None:
+def _print_qrcode(printer: Any, data: str) -> None:
     """Generate QR code and print as image."""
     try:
         qr = qrcode.QRCode(version=1, box_size=4, border=2)
@@ -270,7 +270,7 @@ def _print_qrcode(printer, data: str) -> None:
         printer.text(f"[QR: {data}]\n")
 
 
-def _print_image(printer, path: str) -> None:
+def _print_image(printer: Any, path: str) -> None:
     """Load and print an image file."""
     try:
         img = Image.open(path)

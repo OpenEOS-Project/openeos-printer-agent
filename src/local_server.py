@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from aiohttp import web
 
@@ -197,7 +197,7 @@ class LocalServer:
             await self._runner.cleanup()
             logger.info("Local status server stopped")
 
-    async def _get_system_info(self) -> dict:
+    async def _get_system_info(self) -> dict[str, Any]:
         try:
             return await self._system_monitor.get_system_info()
         except Exception:
