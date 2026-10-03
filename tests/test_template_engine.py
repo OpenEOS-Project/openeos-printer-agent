@@ -35,6 +35,37 @@ class TestTemplateEngine:
         assert "Bratwurst" in result
         assert "Cola" in result
 
+    def test_receipt_prints_one_vat_line_per_rate(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": 80,
+            "tax_amount": 2.56,
+            "tax_lines": [
+                {"rate": 19, "net": 5.0, "tax": 0.95, "gross": 5.95},
+                {"rate": 7.0, "net": 23.0, "tax": 1.61, "gross": 24.61},
+            ],
+        }
+        result = engine.render("receipt", payload)
+        assert "enth. MwSt 19%:" in result
+        assert "enth. MwSt 7%:" in result
+        assert "0,95 EUR" in result
+        assert "1,61 EUR" in result
+        # Keine pauschale Summenzeile neben den Einzelzeilen.
+        assert "2,56 EUR" not in result
+
+    def test_receipt_without_vat(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {k: v for k, v in sample_print_job["payload"].items() if not k.startswith("tax")}
+        result = engine.render("receipt", {**payload, "paper_width": 80})
+        assert "MwSt" not in result
+
+    def test_receipt_prints_change(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {**sample_print_job["payload"], "paper_width": 80, "payment_method": "cash", "change": 4.5}
+        result = engine.render("receipt", payload)
+        assert "Rueckgeld: 4,50 EUR" in result
+
     def test_render_kitchen(self, sample_kitchen_job):
         engine = TemplateEngine()
         result = engine.render("kitchen_ticket", {**sample_kitchen_job["payload"], "paper_width": 80})
