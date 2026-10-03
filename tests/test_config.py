@@ -40,16 +40,28 @@ class TestPrinterConfig:
                 connectionType="network",
             )
 
-    def test_connection_type_accepts_any_string(self):
-        # connectionType has no enum/pattern validation despite the field
-        # comment listing usb|network|bluetooth — any string is accepted.
-        cfg = PrinterConfig(localId="p1", name="Bad Printer", connectionType="serial")
-        assert cfg.connectionType == "serial"
+    def test_connection_type_rejects_invalid_value(self):
+        # connectionType is now a Literal — a typo like "serial" must fail
+        # loudly at startup instead of silently producing a printer that
+        # never connects.
+        with pytest.raises(ValidationError, match="connectionType"):
+            PrinterConfig(localId="p1", name="Bad Printer", connectionType="serial")
 
-    def test_paper_width_accepts_any_int(self):
-        # paperWidth has no validation restricting it to 58/80 either.
-        cfg = PrinterConfig(localId="p1", name="Bad Printer", connectionType="network", paperWidth=72)
-        assert cfg.paperWidth == 72
+    def test_connection_type_accepts_valid_values(self):
+        for value in ("usb", "network", "bluetooth"):
+            cfg = PrinterConfig(localId="p1", name="Printer", connectionType=value)
+            assert cfg.connectionType == value
+
+    def test_paper_width_rejects_invalid_value(self):
+        # paperWidth is now constrained to 58/80 mm — anything else must
+        # fail loudly at startup instead of producing a garbled layout.
+        with pytest.raises(ValidationError, match="paperWidth"):
+            PrinterConfig(localId="p1", name="Bad Printer", connectionType="network", paperWidth=72)
+
+    def test_paper_width_accepts_valid_values(self):
+        for value in (58, 80):
+            cfg = PrinterConfig(localId="p1", name="Printer", connectionType="usb", paperWidth=value)
+            assert cfg.paperWidth == value
 
     def test_default_paper_width(self):
         cfg = PrinterConfig(localId="p1", name="P", connectionType="usb")
