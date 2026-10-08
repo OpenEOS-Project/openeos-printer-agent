@@ -125,3 +125,97 @@ class TestTemplateEngine:
         result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 58})
         # Should render without errors (narrower columns)
         assert "Test Verein" in result
+
+
+class TestRefundTemplates:
+    """Gegenbeleg (Erstattung/Storno) und Storno-Bon der Kueche."""
+
+    def _refund_payload(self, **over):
+        payload = {
+            "organization": {"name": "Test Verein", "address": "Weg 1, 12345 Ort"},
+            "refund_number": "20261008-0042-E1",
+            "refund_kind": "refund",
+            "created_at": "2026-10-08T12:00:00Z",
+            "original_created_at": "2026-10-08T11:30:00Z",
+            "order_number": "20261008-0042",
+            "daily_number": 42,
+            "table_number": "A06",
+            "items": [{"quantity": 1, "name": "Pils", "total": -3.6}],
+            "pfand_amount": -2,
+            "tip_amount": 0,
+            "tax_lines": [{"rate": 19, "net": -3.03, "tax": -0.57, "gross": -3.6}],
+            "total": -5.6,
+            "payment_method": "cash",
+            "payment_label": "Bar",
+            "refund_status": "completed",
+            "reason": "Qualitaet: schal",
+            "actor_name": "Lena Kasse",
+            "device_name": "Kasse 1",
+            "paper_width": 80,
+        }
+        payload.update(over)
+        return payload
+
+    def test_refund_receipt_shows_negative_amounts_and_reference(self):
+        result = TemplateEngine().render("refund_receipt", self._refund_payload())
+        assert "ERSTATTUNG" in result
+        assert "Gegenbeleg" in result
+        assert "Beleg 20261008-0042-E1" in result
+        assert "Zu Bestellung #20261008-0042 (Nr. 42)" in result
+        assert "-1x" in result and "Pils" in result
+        assert "-3,60 EUR" in result
+        assert "Pfand:" in result and "-2,00 EUR" in result
+        assert "enth. MwSt 19%:" in result and "-0,57 EUR" in result
+        assert "ERSTATTET:" in result and "-5,60 EUR" in result
+        assert "Rueckgabe: Bar" in result
+        assert "Grund: Qualitaet: schal" in result
+        assert "Bediener: Lena Kasse" in result
+        assert "NACHDRUCK" not in result
+        assert "TESTMODUS" not in result
+
+    def test_refund_receipt_storno_reprint_manual_test(self):
+        result = TemplateEngine().render(
+            "refund_receipt",
+            self._refund_payload(
+                refund_kind="cancellation",
+                reprint=True,
+                is_test=True,
+                refund_status="manual",
+                payment_label="Karte (SumUp)",
+                provider_reference="txn-77",
+            ),
+        )
+        assert "STORNO" in result
+        assert "NACHDRUCK" in result
+        assert "TESTMODUS" in result
+        assert "(manuell erstattet)" in result
+        assert "Transaktion: txn-77" in result
+
+    def test_refund_receipt_minimal_payload(self):
+        result = TemplateEngine().render(
+            "refund_receipt",
+            {"organization": {}, "created_at": "2026-10-08T12:00:00Z", "total": -1},
+        )
+        assert "ERSTATTET:" in result
+
+    def test_cancellation_ticket(self):
+        result = TemplateEngine().render(
+            "cancellation_ticket",
+            {
+                "daily_number": 5,
+                "table_number": "A06",
+                "station_name": "Grill",
+                "items": [{"quantity": 2, "name": "Pommes", "options": ["ohne Salz"]}],
+                "reason": "Wunsch des Gastes",
+                "created_at": "2026-10-08T12:00:00Z",
+                "paper_width": 80,
+            },
+        )
+        assert "STORNO" in result
+        assert "Nicht zubereiten" in result
+        assert "#5" in result
+        assert "TISCH A06" in result
+        assert "Station: Grill" in result
+        assert "-2x Pommes" in result
+        assert "ohne Salz" in result
+        assert "Grund: Wunsch des Gastes" in result
