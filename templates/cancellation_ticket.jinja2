@@ -1,0 +1,39 @@
+{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{% set sep = "=" * cols %}
+{% set box = "#" * cols %}
+{% if is_test %}
+<<CENTER>><<BOLD>><<BIG>>*** TESTMODUS ***<</BIG>><</BOLD>><</CENTER>>
+
+{% endif %}
+{{ box }}
+<<CENTER>><<BOLD>><<BIG>>STORNO<</BIG>><</BOLD>><</CENTER>>
+<<CENTER>>Nicht zubereiten<</CENTER>>
+{{ box }}
+
+<<CENTER>><<BIG>>#{{ daily_number|default(order_number|default("---")) }}<</BIG>><</CENTER>>
+{% if table_number is defined and table_number %}
+<<CENTER>><<BOLD>>TISCH {{ table_number }}<</BOLD>><</CENTER>>
+{% endif %}
+{% if station_name is defined and station_name %}
+<<CENTER>>Station: {{ station_name }}<</CENTER>>
+{% endif %}
+{{ sep }}
+<<LEFT>>
+{% for item in items|default([]) %}
+<<BOLD>><<BIG>>-{{ item.quantity }}x {{ item.name }}<</BIG>><</BOLD>>
+{% if item.options is defined and item.options %}
+{% for opt in item.options %}
+    {{ opt }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+{{ sep }}
+{% if reason is defined and reason %}
+Grund: {{ reason }}
+{% endif %}
+{% if created_at is defined and created_at %}
+Storniert: {{ created_at|strftime("%d.%m.%Y %H:%M") }}
+{% endif %}
+<<FEED:3>>
+<<CUT>>
