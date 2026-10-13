@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,9 @@ name = "openeos-printer-agent"
 version = "0.1.0"
 description = "OpenEOS Printer Agent - ESC/POS printer control via WebSocket"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{name = "LUXCODE by Lukas Lukic-Spitznagel"}]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

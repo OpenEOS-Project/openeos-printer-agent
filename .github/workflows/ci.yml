@@ -90,3 +90,34 @@ jobs:
           # Bewusst nur bauen, nicht veroeffentlichen: Der Agent wird auf den
           # Geraeten aus dem Quelltext installiert, nicht aus einem Registry.
           push: false
+
+  # SBOM (CycloneDX) der Laufzeit-Abhaengigkeiten, wie sie install.sh auf
+  # den Geraeten installiert, als Build-Artefakt. Vorbereitung auf den
+  # Cyber Resilience Act (Anhang I Teil II, ab 12/2027).
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Python einrichten
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: SBOM erzeugen
+        run: |
+          python -m venv /tmp/agent-env
+          /tmp/agent-env/bin/pip install --quiet -r requirements.txt
+          python -m pip install --quiet cyclonedx-bom
+          cyclonedx-py environment --pyproject pyproject.toml --of JSON -o sbom.cdx.json /tmp/agent-env/bin/python
+
+      - name: SBOM hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: openeos-printer-agent-sbom.cdx.json
+          path: sbom.cdx.json
