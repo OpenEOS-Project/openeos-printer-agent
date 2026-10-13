@@ -24,7 +24,7 @@ Python-based agent that runs on a Raspberry Pi (or any Linux machine) to control
 
 ```bash
 # Clone the repository
-git clone https://github.com/openeos/openeos-printer-agent.git
+git clone https://github.com/OpenEOS-Project/openeos-printer-agent.git
 cd openeos-printer-agent
 
 # Run the installer (as root)
@@ -160,3 +160,14 @@ python -m src.main --config config/config.yaml
 | Epson | TM-T20III, TM-T88V/VI, TM-M30 | USB, Network |
 | Star | TSP143III, TSP654II | USB, Network |
 | Bixolon | SRP-350III, SRP-380 | USB, Network |
+
+## License
+
+Copyright (C) 2026 LUXCODE by Lukas Lukic-Spitznagel and contributors.
+
+Licensed under the GNU Affero General Public License v3.0 or (at your option) any later version (`AGPL-3.0-or-later`), see [LICENSE](LICENSE) and [NOTICE](NOTICE). Earlier versions declared the MIT License in `pyproject.toml`; see NOTICE.
+
+## Security
+
+Please report vulnerabilities privately via GitHub (**Security → Report a vulnerability**) or as described in the [organization security policy](https://github.com/OpenEOS-Project/.github/blob/main/SECURITY.md).
+

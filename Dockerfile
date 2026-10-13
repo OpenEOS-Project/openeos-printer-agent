@@ -13,6 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 COPY templates/ templates/
+# License texts travel with the image (AGPL-3.0-or-later)
+COPY LICENSE NOTICE ./
 
 RUN mkdir -p cache/templates config
 
