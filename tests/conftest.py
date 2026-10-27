@@ -1,14 +1,34 @@
 import pytest
 
 from src.config import (
-    AgentConfig,
     AppConfig,
+    DiscoveryConfig,
     LocalServerConfig,
     LoggingConfig,
-    PrinterConfig,
-    SentryConfig,
     ServerConfig,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data_dirs(tmp_path, monkeypatch):
+    """Keep every test away from the real data/log directories.
+
+    src/paths.py honours these environment variables, so the device token,
+    job store, template cache and log files of a test all land in tmp_path.
+    """
+    monkeypatch.setenv("OPENEOS_PRINTER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OPENEOS_PRINTER_LOG_DIR", str(tmp_path / "logs"))
+
+
+@pytest.fixture(autouse=True)
+def _detach_agent_log_handlers():
+    """setup_logging() adds a console handler bound to pytest's captured
+    stdout; once the test ends that stream is closed and later log calls
+    would raise "I/O operation on closed file"."""
+    yield
+    from src.utils import remove_agent_handlers
+
+    remove_agent_handlers()
 
 
 @pytest.fixture(autouse=True)
@@ -16,10 +36,9 @@ def _isolate_template_cache(tmp_path, monkeypatch):
     """Point TemplateEngine's on-disk template cache at a throwaway dir.
 
     Without this, TemplateEngine.update_server_templates() (used by the
-    server-template-override tests) writes .jinja2 files into the real
-    repo-root cache/templates/ dir. Those files then persist across test
-    runs (cache/ is gitignored, so nothing cleans them up) and get loaded
-    by every subsequent TemplateEngine() instance, silently overriding
+    server-template-override tests) writes .jinja2 files into the shared
+    cache dir. Those files then persist across test runs and get loaded by
+    every subsequent TemplateEngine() instance, silently overriding
     built-in templates like "receipt" in unrelated tests.
     """
     from src import template_engine
@@ -36,38 +55,13 @@ def sample_server_config():
 
 
 @pytest.fixture
-def sample_printer_config():
-    return PrinterConfig(
-        localId="printer-001",
-        name="Test Printer",
-        connectionType="network",
-        paperWidth=80,
-        ipAddress="192.168.1.100",
-        port=9100,
-    )
-
-
-@pytest.fixture
-def sample_usb_printer_config():
-    return PrinterConfig(
-        localId="printer-002",
-        name="USB Printer",
-        connectionType="usb",
-        paperWidth=80,
-        usbVendorId="0x04b8",
-        usbProductId="0x0202",
-    )
-
-
-@pytest.fixture
-def sample_config(sample_server_config, sample_printer_config):
+def sample_config(sample_server_config, tmp_path):
     return AppConfig(
-        agent=AgentConfig(id="test-agent", name="Test Agent"),
         server=sample_server_config,
-        printers=[sample_printer_config],
-        logging=LoggingConfig(level="DEBUG"),
+        logging=LoggingConfig(level="DEBUG", dir=str(tmp_path / "logs")),
         local_server=LocalServerConfig(enabled=False),
-        sentry=SentryConfig(enabled=False),
+        discovery=DiscoveryConfig(interval_s=3600, mdns_timeout_s=0.1),
+        data_dir=str(tmp_path / "data"),
     )
 
 

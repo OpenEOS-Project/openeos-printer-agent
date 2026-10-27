@@ -2,15 +2,41 @@ import asyncio
 import json
 import logging
 import os
+import socket
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
 
 from .config import AppConfig
-from .version import __version__
+from .version import get_version
 
 logger = logging.getLogger(__name__)
+
+# How long to wait between attempts when the server cannot be reached during
+# first registration. A freshly installed service must not crash-loop just
+# because the network came up a few seconds late.
+REGISTER_RETRY_S = 10.0
+
+
+def format_pairing_banner(code: str, server_url: str, status_url: Optional[str]) -> str:
+    """The pairing code, impossible to miss in a console or log file."""
+    spaced = f"{code[:3]} {code[3:]}" if len(code) == 6 else code
+    lines = [
+        "",
+        "=" * 64,
+        "  OpenEOS Printer Agent - PAIRING REQUIRED",
+        "",
+        f"  Pairing code:   {spaced}",
+        "",
+        "  Open the OpenEOS web app > Drucker > 'Drucker-Agent verbinden'",
+        "  and enter this code. The agent keeps waiting until it is linked.",
+        f"  Server: {server_url}",
+    ]
+    if status_url:
+        lines.append(f"  Status page: {status_url}")
+    lines += ["=" * 64, ""]
+    return "\n".join(lines)
 
 
 class DeviceRegistrar:
@@ -54,13 +80,24 @@ class DeviceRegistrar:
     def organization_name(self) -> Optional[str]:
         return self._organization_name
 
+    @property
+    def token_file(self) -> Path:
+        return self._config.device_token_path
+
+    def _status_url(self) -> Optional[str]:
+        cfg = self._config.local_server
+        if not cfg.enabled:
+            return None
+        host = "localhost" if cfg.host in ("0.0.0.0", "::", "") else cfg.host
+        return f"http://{host}:{cfg.port}"
+
     async def ensure_registered(self) -> str:
         """Ensure the device has a valid device_token.
 
         Checks in order:
         1. YAML config (pre-provisioned)
         2. Persistent token file (previous self-registration)
-        3. Self-register via POST /devices/init
+        3. Self-register via POST /devices/init (retried until the server answers)
 
         Returns the device_token.
         """
@@ -71,7 +108,7 @@ class DeviceRegistrar:
             return self._device_token
 
         # 2. Check persistent token file
-        token_file = Path(self._config.device_token_file)
+        token_file = self.token_file
         if token_file.exists():
             try:
                 data = json.loads(token_file.read_text(encoding="utf-8"))
@@ -79,26 +116,38 @@ class DeviceRegistrar:
                     self._device_token = data["device_token"]
                     self._device_id = data.get("device_id")
                     self._verification_code = data.get("verification_code")
+                    if self._verification_code:
+                        # Registered earlier but never linked: show the code again.
+                        self._status = "pending"
+                        logger.info(
+                            format_pairing_banner(self._verification_code, self._config.server.url, self._status_url())
+                        )
                     logger.info(f"Loaded device token from {token_file}")
-                    return self._device_token
+                    return str(self._device_token)
             except Exception as e:
                 logger.warning(f"Failed to read token file {token_file}: {e}")
 
         # 3. Self-register
         logger.info("No device token found, initiating self-registration...")
-        await self._self_register()
-        return self._device_token  # type: ignore
+        while True:
+            try:
+                await self._self_register()
+                break
+            except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as e:
+                logger.warning(f"Registration failed ({e}); retrying in {REGISTER_RETRY_S:.0f}s")
+                await asyncio.sleep(REGISTER_RETRY_S)
+        return str(self._device_token)
 
     async def _self_register(self) -> None:
         """Register this device via POST /devices/init."""
         url = f"{self._config.server.url}/devices/init"
         payload = {
-            "suggestedName": f"Printer-Agent-{self._config.agent.id}",
-            "userAgent": f"openeos-printer-agent/{__version__}",
+            "suggestedName": f"Drucker-Agent {socket.gethostname()}",
+            "userAgent": f"openeos-printer-agent/{get_version()}",
             "deviceType": "printer_agent",
         }
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status != 201:
                     body = await resp.text()
@@ -113,26 +162,28 @@ class DeviceRegistrar:
         self._status = "pending"
 
         logger.info(f"Device registered: {self._device_id}")
-        logger.info(f"Verification code: {self._verification_code}")
+        logger.info(format_pairing_banner(str(self._verification_code), self._config.server.url, self._status_url()))
 
         # Persist token
         self._save_token()
 
     def _save_token(self) -> None:
         """Save device token to persistent file."""
-        token_file = Path(self._config.device_token_file)
+        token_file = self.token_file
         try:
             token_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "device_token": self._device_token,
                 "device_id": self._device_id,
                 "verification_code": self._verification_code,
+                "server_url": self._config.server.url,
             }
             token_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
             # write_text doesn't take a mode, so the file lands at whatever
             # the umask leaves it — commonly 644, world-readable. This is a
             # credential (device_token authenticates as this device), so
             # lock it down explicitly rather than trust the deployment's umask.
+            # (No-op on Windows; ProgramData ACLs apply there.)
             os.chmod(token_file, 0o600)
             logger.info(f"Device token saved to {token_file}")
         except Exception as e:
@@ -144,15 +195,19 @@ class DeviceRegistrar:
         This handles both:
         - Self-registered devices waiting for admin to enter the code
         - Pre-provisioned devices waiting for org assignment
+
+        While pending, the pairing banner is repeated every minute so it
+        stays visible in a scrolling log.
         """
         url = f"{self._config.server.url}/devices/status"
         headers = {"x-device-token": self._device_token or ""}
 
         logger.info("Waiting for device verification...")
+        polls = 0
 
         while True:
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
                     async with session.get(url, headers=headers) as resp:
                         if resp.status == 200:
                             result = await resp.json()
@@ -191,9 +246,12 @@ class DeviceRegistrar:
                             raise RuntimeError("Invalid device token")
                         else:
                             logger.warning(f"Status check failed: {resp.status}")
-            except aiohttp.ClientError as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.warning(f"Connection error during status check: {e}")
             except RuntimeError:
                 raise
 
+            polls += 1
+            if self._verification_code and polls % max(1, int(60 / poll_interval)) == 0:
+                logger.info(format_pairing_banner(self._verification_code, self._config.server.url, self._status_url()))
             await asyncio.sleep(poll_interval)

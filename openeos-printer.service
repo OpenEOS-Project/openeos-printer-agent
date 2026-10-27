@@ -1,6 +1,6 @@
 [Unit]
 Description=OpenEOS Printer Agent
-Documentation=https://github.com/openeos/openeos-printer-agent
+Documentation=https://github.com/OpenEOS-Project/openeos-printer-agent
 After=network-online.target
 Wants=network-online.target
 
@@ -9,7 +9,7 @@ Type=simple
 User=openeos
 Group=openeos
 WorkingDirectory=/opt/openeos-printer-agent
-ExecStart=/opt/openeos-printer-agent/venv/bin/python -m src.main --config /opt/openeos-printer-agent/config/config.yaml
+ExecStart=/opt/openeos-printer-agent/venv/bin/python -m src.main run --config /opt/openeos-printer-agent/config/config.yaml
 Restart=always
 RestartSec=10
 StartLimitBurst=5
@@ -26,13 +26,12 @@ ProtectControlGroups=true
 # Allow USB printer access
 SupplementaryGroups=lp plugdev
 
-# Allow write access to cache, logs, and the persisted device token +
-# crash-safe job queue (both default under /var/lib/openeos-printer — see
-# device_token_file / job_store_file in src/config.py). Without this,
+# Allow write access to logs and the data directory (device token, crash-safe
+# job queue, cached templates - see src/paths.py). Without this,
 # self-registration silently fails to persist under ProtectSystem=strict
 # and the agent re-registers with a new token/verification code on every
 # restart.
-ReadWritePaths=/opt/openeos-printer-agent/cache /var/log/openeos-printer /var/lib/openeos-printer
+ReadWritePaths=/var/log/openeos-printer /var/lib/openeos-printer
 
 # Environment
 Environment=PYTHONUNBUFFERED=1

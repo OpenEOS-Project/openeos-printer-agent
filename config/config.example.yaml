@@ -1,63 +1,39 @@
-# OpenEOS Printer Agent Configuration
-# Copy this file to config.yaml and adjust the values for your hardware.
+# OpenEOS Printer Agent - configuration
+#
+# The only required setting is server_url. Printers are NOT configured here:
+# the agent finds USB and network printers itself and reports them to the
+# platform; an admin adopts them in the web app under "Drucker".
+#
+# Locations searched (first hit wins): --config FILE,
+#   Linux:   /var/lib/openeos-printer/config.yaml, ./config/config.yaml,
+#            /etc/openeos-printer/config.yaml, ~/.config/openeos-printer/config.yaml
+#   Windows: %ProgramData%\OpenEOS Printer Agent\config.yaml, .\config\config.yaml
 
-agent:
-  # Unique identifier for this agent instance (e.g. hostname). Stable across restarts.
-  id: "openeos-pr01"
-  # Human-readable name shown in the admin UI
-  name: "OpenEOS Drucker pr01"
+# Base URL of the OpenEOS API, including the /api prefix.
+server_url: "https://api.openeos.de/api"
 
-server:
-  # OpenEOS API base URL — must include the /api global prefix
-  url: "https://api.openeos.example.com/api"
-  # Optional: pre-provisioned device token. Leave empty to trigger self-registration
-  # device_token: ""
-  # Heartbeat / reconnect tuning (ms)
-  heartbeat_interval_ms: 30000
-  reconnect_interval_ms: 5000
-  reconnect_max_interval_ms: 60000
+# Optional: pre-provisioned device token. Leave unset - the agent pairs
+# itself on first start (6-digit code in the log and on http://localhost:8080)
+# and stores the token in the data directory.
+# device_token: ""
 
-# ─── Printers attached to this RPi ───────────────────────────────
-# This is the source of truth for the hardware-fixed values. The agent pushes
-# them to the backend on every connect — the admin UI shows them read-only.
-# Only `hasCashDrawer` and the organization assignment are editable in the UI.
-printers:
-  - localId: "openeos-pr01"          # stable per agent install (matches agent.id by convention)
-    name: "Kassenbon-Drucker"
-    type: "receipt"                  # receipt | kitchen | label
-    connectionType: "usb"            # usb | network | bluetooth
-    usbVendorId: "0x04b8"            # Epson
-    usbProductId: "0x0202"           # TM-T88V / TM-T70 / similar
-    paperWidth: 80                   # 58 or 80 mm
-
-  # Network printer example (commented):
-  # - localId: "kitchen-printer"
-  #   name: "Kuechen-Drucker"
-  #   type: "kitchen"
-  #   connectionType: "network"
-  #   ipAddress: "192.168.1.100"
-  #   port: 9100
-  #   paperWidth: 80
+# Optional overrides. Defaults: Linux /var/lib/openeos-printer (or
+# ~/.local/share/openeos-printer), Windows %ProgramData%\OpenEOS Printer Agent.
+# data_dir: "/var/lib/openeos-printer"
 
 logging:
-  # Log level: DEBUG, INFO, WARNING, ERROR
-  level: "INFO"
-  # Log file path (optional, logs to console if not set)
-  file: "/var/log/openeos-printer/agent.log"
-  # Max log file size in bytes (default: 10 MB)
-  max_bytes: 10485760
-  # Number of backup log files (default: 5)
-  backup_count: 5
+  level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+  # dir: "/var/log/openeos-printer"   # rotating agent.log (10 MB x 5)
 
 local_server:
-  # Enable local status web server (http://<rpi>:8080)
-  enabled: true
+  enabled: true            # status page + pairing code on http://<host>:8080
   host: "0.0.0.0"
   port: 8080
 
-sentry:
-  # Enable Sentry error tracking
-  enabled: false
-  dsn: ""
-  environment: "production"
-  traces_sample_rate: 0.1
+discovery:
+  interval_s: 300          # automatic scan every 5 minutes
+  # subnet: "192.168.1.0/24"        # /24 for the port-9100 scan (default: own interface)
+  # subnet_scan_on_schedule: false  # port scan also on the automatic runs
+
+# Cash-drawer kick pin (2 for most Epson drawers, some use 5).
+cash_drawer_pin: 2
