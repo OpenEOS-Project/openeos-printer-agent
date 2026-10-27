@@ -7,12 +7,19 @@ from pydantic import BaseModel, Field
 
 from .paths import default_config_search_paths, default_data_dir, default_log_dir
 
+# The hosted OpenEOS service. Used when neither a config file nor
+# ``--server-url`` names a server, so a freshly downloaded binary can pair
+# without any arguments (double-click on Windows). Self-hosters override it
+# with ``--server-url`` or ``server_url:`` in config.yaml.
+DEFAULT_SERVER_URL = "https://api.openeos.de/api"
+
 
 class ServerConfig(BaseModel):
-    """Connection tuning. ``url`` is the only value a deployment has to set;
-    everything else has defaults that match the backend's expectations."""
+    """Connection tuning. ``url`` is the only value a deployment may have to
+    set (it defaults to the hosted service); everything else has defaults
+    that match the backend's expectations."""
 
-    url: str = "http://localhost:3000"
+    url: str = DEFAULT_SERVER_URL
     device_token: Optional[str] = None
     heartbeat_interval_ms: int = 30000
     reconnect_interval_ms: int = 5000
@@ -99,6 +106,10 @@ class AppConfig(BaseModel):
     # Test helper: every adopted printer is backed by escpos.printer.Dummy and
     # the rendered ESC/POS output is written to the log instead of hardware.
     dummy_printer: bool = False
+    # Where server.url came from (set by load_config): "--server-url",
+    # "config file <path>" or "default". Only used for the startup log line
+    # that tells the operator how to point the agent somewhere else.
+    server_url_source: str = "default"
 
     def model_post_init(self, __context: Any) -> None:
         # Let the flat keys win over the nested block so a minimal YAML
@@ -147,6 +158,18 @@ class AppConfig(BaseModel):
     def template_cache_path(self) -> Path:
         return self.data_path / "templates-cache"
 
+    def describe_server_url(self) -> str:
+        """One line for the log/console: which server, chosen how, and how
+        to change it. Shown at every start so a self-hoster who forgot the
+        flag sees immediately why the agent talks to the hosted service."""
+        if self.server_url_source == "default":
+            return (
+                f"Server: {self.server.url} (default: hosted OpenEOS service). "
+                f"Self-hosting? Start with --server-url https://<your-host>/api "
+                f"or set server_url in {self.data_path / 'config.yaml'}"
+            )
+        return f"Server: {self.server.url} (from {self.server_url_source})"
+
 
 def find_config_file(path: Optional[str] = None) -> Optional[Path]:
     """Resolve the config file to load (explicit path or first default hit)."""
@@ -168,12 +191,14 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict[str, Any]] 
     4. /etc/openeos-printer/config.yaml, ~/.config/openeos-printer/config.yaml (Linux)
 
     ``overrides`` (CLI flags such as ``--server-url``) take precedence over
-    the file. With neither a file nor overrides the defaults apply, which is
-    fine for a first interactive start against localhost.
+    the file. With neither a file nor overrides the defaults apply - in
+    particular ``DEFAULT_SERVER_URL`` (the hosted service), so a plain
+    ``openeos-printer-agent run`` without any arguments can pair.
     """
     config_path = find_config_file(path)
 
     raw: dict[str, Any] = {}
+    source = "default"
     if config_path is not None:
         if not config_path.exists():
             print(f"ERROR: Configuration file not found: {config_path}", file=sys.stderr)
@@ -191,10 +216,15 @@ def load_config(path: Optional[str] = None, overrides: Optional[dict[str, Any]] 
                 )
             raw.pop("agent", None)
             raw.pop("sentry", None)
+            if raw.get("server_url") or (isinstance(raw.get("server"), dict) and raw["server"].get("url")):
+                source = f"config file {config_path}"
 
     for key, value in (overrides or {}).items():
         if value is not None:
             raw[key] = value
+    if (overrides or {}).get("server_url"):
+        source = "--server-url"
+    raw["server_url_source"] = source
 
     return AppConfig(**raw)
 

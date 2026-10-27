@@ -87,6 +87,34 @@ WAITING_FOR_ORG_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+BLOCKED_HTML = """<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="10">
+<title>OpenEOS Printer Agent - Gesperrt</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f5f5f5; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
+  .container {{ text-align: center; padding: 2em; max-width: 500px; }}
+  h1 {{ color: #1a1a1a; font-size: 1.5em; margin-bottom: 0.5em; }}
+  .badge {{ display: inline-block; padding: 0.4em 1.2em; border-radius: 12px; background: #f8d7da; color: #721c24; font-weight: bold; margin: 0.5em 0; }}
+  .instructions {{ color: #555; font-size: 1.1em; margin: 1em 0; }}
+  .meta {{ color: #888; font-size: 0.85em; margin-top: 2em; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>OpenEOS Printer Agent</h1>
+  <div class="badge">Gesperrt</div>
+  <p class="instructions">Dieser Drucker-Agent wurde in der OpenEOS Web-App gesperrt. Hebe die Sperre unter <strong>Drucker &rarr; Drucker-Agent</strong> auf - der Agent verbindet sich dann von selbst wieder.</p>
+  <p class="meta">Rechner: {hostname}</p>
+  <p class="meta">Server: {server_url}</p>
+  <p class="meta">v{version} &middot; Auto-Refresh alle 10 Sekunden</p>
+</div>
+</body>
+</html>"""
+
 STATUS_HTML = """<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -229,9 +257,14 @@ class LocalServer:
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
+    def _in_setup_mode(self) -> bool:
+        """Pairing (first start or after the device was removed on the
+        server) and "blocked" both show the setup views, not the dashboard."""
+        return self._device_registrar is not None and self._device_registrar.status != "verified"
+
     async def _handle_api_status(self, request: web.Request) -> web.Response:
         # Setup mode
-        if self._device_registrar and not self._printer_manager:
+        if self._device_registrar and self._in_setup_mode():
             return web.json_response(
                 {
                     "mode": "setup",
@@ -279,8 +312,18 @@ class LocalServer:
         return web.json_response(await self._get_system_info())
 
     async def _handle_status_page(self, request: web.Request) -> web.Response:
-        # Setup mode: show verification code
-        if self._device_registrar and self._device_registrar.status == "pending":
+        # Blocked in the web app: nothing to enter, just say so
+        if self._device_registrar and self._device_registrar.status == "blocked":
+            page = BLOCKED_HTML.format(
+                server_url=html.escape(self._config.server.url),
+                hostname=html.escape(socket.gethostname()),
+                version=__version__,
+            )
+            return web.Response(text=page, content_type="text/html")
+
+        # Setup mode: show verification code (or a placeholder while the
+        # registration is still in flight)
+        if self._device_registrar and self._device_registrar.status in ("pending", "unknown"):
             page = SETUP_HTML.format(
                 verification_code=self._device_registrar.verification_code or "------",
                 server_url=html.escape(self._config.server.url),

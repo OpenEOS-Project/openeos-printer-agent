@@ -6,7 +6,8 @@ own**, reports them to the OpenEOS platform, and prints the jobs (receipts,
 kitchen tickets, labels) the platform sends it. Which printer is used for
 what is configured in the OpenEOS web app, not on the PC.
 
-- Pairing with a 6-digit code - no tokens to copy
+- Pairing with a 6-digit code - no tokens to copy; no arguments needed for
+  the hosted service (`https://api.openeos.de/api` is the default)
 - Discovery: USB (pyusb), Windows print spooler, mDNS/Bonjour, optional
   port-9100 scan of the local network
 - Printing: ESC/POS via USB, raw TCP 9100, or the Windows spooler ("Generic / Text Only")
@@ -22,18 +23,22 @@ what is configured in the OpenEOS web app, not on the PC.
 1. Download `openeos-printer-agent-windows-x64.exe` from the
    [latest release](https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest)
    and put it somewhere permanent, e.g. `C:\Program Files\OpenEOS\`.
-2. First look (optional, shows the pairing code in the window):
+2. First look (optional): double-click the EXE or run
    ```
-   openeos-printer-agent-windows-x64.exe run --server-url https://api.openeos.de/api
+   openeos-printer-agent-windows-x64.exe
    ```
-   Stop with Ctrl+C.
+   It connects to the hosted service (`https://api.openeos.de/api`) and shows
+   the pairing code in the window. Stop with Ctrl+C. Self-hosting? Add
+   `--server-url https://<your-host>/api`.
 3. Install as a service - open a **Command Prompt as Administrator**:
    ```
-   openeos-printer-agent-windows-x64.exe install-service --server-url https://api.openeos.de/api
+   openeos-printer-agent-windows-x64.exe install-service
    ```
-   The service "OpenEOS Printer Agent" starts automatically with Windows.
-   The pairing code is in `%ProgramData%\OpenEOS Printer Agent\logs\agent.log`
-   and on `http://localhost:8080`.
+   (again with `--server-url ...` for your own server; the URL in use is
+   written to `config.yaml` so the service needs no flags.) The service
+   "OpenEOS Printer Agent" starts automatically with Windows. The pairing
+   code is in `%ProgramData%\OpenEOS Printer Agent\logs\agent.log` and on
+   `http://localhost:8080`.
 4. Remove: `openeos-printer-agent-windows-x64.exe remove-service` (as Administrator).
 
 Everything the agent stores lives in `%ProgramData%\OpenEOS Printer Agent`
@@ -69,7 +74,8 @@ On 32-bit OS or Pi 3 use the source install (`install.sh` without `--binary`).
 ```bash
 curl -LO https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest/download/openeos-printer-agent-linux-x64
 chmod +x openeos-printer-agent-linux-x64
-./openeos-printer-agent-linux-x64 run --server-url https://api.openeos.de/api
+./openeos-printer-agent-linux-x64                      # hosted service
+./openeos-printer-agent-linux-x64 run --server-url https://<your-host>/api   # self-hosted
 ```
 
 Without root the data goes to `~/.local/share/openeos-printer`.
@@ -78,7 +84,7 @@ Without root the data goes to `~/.local/share/openeos-printer`.
 
 ```bash
 pip install .
-openeos-printer-agent run --server-url https://api.openeos.de/api
+openeos-printer-agent run                              # or --server-url https://<your-host>/api
 ```
 
 ### Docker
@@ -109,6 +115,18 @@ The device token is stored locally (`device.json`); restarts reuse it.
 `openeos-printer-agent pair` does only the registration + waiting and exits
 once linked - handy before `install-service`.
 
+**Removing or blocking the agent** (web app: **Drucker** > **Drucker-Agent**):
+
+- *Agent entfernen*: the server forgets the token. The running agent notices
+  (immediately on the next reconnect, otherwise with its next report to the
+  server, at most a few minutes), logs it, deletes the stale `device.json`
+  and **automatically shows a new pairing code** - in the log and on
+  `http://localhost:8080`. No restart, no file to delete by hand. The same
+  happens when the agent starts with a token the server no longer knows.
+- *Agent sperren*: the agent does **not** re-pair. It disconnects, shows
+  "Gesperrt" on the status page and checks every 60 s whether it was
+  unblocked; then it reconnects with the same token.
+
 ## Discovery
 
 Runs at start, every 5 minutes, and when you click **Neu suchen** in the web app.
@@ -127,7 +145,10 @@ IP and port.
 
 ## Configuration
 
-Only `server_url` is required. Full example: `config/config.example.yaml`.
+Nothing is required: without a config file and without `--server-url` the
+agent uses the hosted service `https://api.openeos.de/api` and says so in
+the log at every start (together with how to change it). Self-hosters set
+`server_url`. Full example: `config/config.example.yaml`.
 
 ```yaml
 server_url: "https://api.openeos.de/api"
@@ -142,8 +163,10 @@ cash_drawer_pin: 2
 ```
 
 Lookup order: `--config FILE`, `<data dir>/config.yaml`, `./config/config.yaml`,
-`/etc/openeos-printer/config.yaml`. `--server-url` on the command line wins
-over the file and, when no file exists yet, is written to `<data dir>/config.yaml`.
+`/etc/openeos-printer/config.yaml`. Server URL precedence: `--server-url`,
+then `server_url` from the file, then the hosted default. `--server-url`
+is written to `<data dir>/config.yaml` when no file exists yet, and
+`install-service` / `install.sh` always persist the URL in use.
 
 Environment overrides: `OPENEOS_PRINTER_DATA_DIR`, `OPENEOS_PRINTER_LOG_DIR`.
 
@@ -212,9 +235,11 @@ by a VPN that owns the default route. Set `discovery.subnet` to the printer's
 on port 9100 (sometimes called "RAW" or "JetDirect").
 
 **Agent shows as offline** - check `agent.log` / `journalctl`, the status page,
-and that `server_url` includes `/api`. The agent reconnects by itself; the
-device token is in `device.json` in the data directory. Delete that file to
-pair again with a new code (also remove the old agent in the web app).
+and that `server_url` includes `/api` (the log's first lines say which server
+is used and why). The agent reconnects by itself; the device token is in
+`device.json` in the data directory. To pair again with a new code just
+remove the agent in the web app - the agent notices and shows a new code
+on its own. A blocked agent waits until it is unblocked.
 
 **Windows service does not start** - run the exe with `run` in a console to
 see the error; `install-service` must be run as Administrator; logs in
