@@ -41,3 +41,7 @@ htmlcov/
 
 # OMC tooling state
 .omc/
+
+# Local data when running from the checkout
+data/
+screenshots/

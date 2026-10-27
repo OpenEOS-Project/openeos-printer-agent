@@ -1,173 +1,256 @@
 # OpenEOS Printer Agent
 
-Python-based agent that runs on a Raspberry Pi (or any Linux machine) to control ESC/POS thermal printers via WebSocket communication with the OpenEOS backend.
+Small service that runs on **any Linux or Windows PC** (Raspberry Pi included)
+next to your receipt printers. It **finds USB and network printers on its
+own**, reports them to the OpenEOS platform, and prints the jobs (receipts,
+kitchen tickets, labels) the platform sends it. Which printer is used for
+what is configured in the OpenEOS web app, not on the PC.
 
-## Features
+- Pairing with a 6-digit code - no tokens to copy
+- Discovery: USB (pyusb), Windows print spooler, mDNS/Bonjour, optional
+  port-9100 scan of the local network
+- Printing: ESC/POS via USB, raw TCP 9100, or the Windows spooler ("Generic / Text Only")
+- Crash-safe job queue (jobs survive restarts), per-printer retries
+- Jinja2 templates with per-organisation overrides from the platform
+- Local status page with pairing code and found printers: `http://localhost:8080`
+- Windows service, systemd unit, single-file binaries for Windows x64, Linux x64 and arm64
 
-- Multi-printer support (USB, Network, Bluetooth)
-- Real-time print job reception via Socket.io
-- Jinja2 template engine with server-side template override
-- Per-printer job queues with retry logic
-- Local status web server (http://localhost:8080)
-- Heartbeat monitoring with system metrics
-- Systemd service with security hardening
+## Install
 
-## Requirements
+### Windows (exe + service)
 
-- Python 3.11+
-- Raspberry Pi OS / Debian / Ubuntu
-- ESC/POS compatible thermal printer
+1. Download `openeos-printer-agent-windows-x64.exe` from the
+   [latest release](https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest)
+   and put it somewhere permanent, e.g. `C:\Program Files\OpenEOS\`.
+2. First look (optional, shows the pairing code in the window):
+   ```
+   openeos-printer-agent-windows-x64.exe run --server-url https://api.openeos.de/api
+   ```
+   Stop with Ctrl+C.
+3. Install as a service - open a **Command Prompt as Administrator**:
+   ```
+   openeos-printer-agent-windows-x64.exe install-service --server-url https://api.openeos.de/api
+   ```
+   The service "OpenEOS Printer Agent" starts automatically with Windows.
+   The pairing code is in `%ProgramData%\OpenEOS Printer Agent\logs\agent.log`
+   and on `http://localhost:8080`.
+4. Remove: `openeos-printer-agent-windows-x64.exe remove-service` (as Administrator).
 
-## Quick Start
+Everything the agent stores lives in `%ProgramData%\OpenEOS Printer Agent`
+(`config.yaml`, `device.json` with the token, `print-jobs.db`, `logs\`).
 
-### Raspberry Pi Installation
+USB printers on Windows are used through the **print spooler**: install the
+printer with the vendor driver or with Windows' built-in "Generic / Text Only"
+driver, make sure it prints a test page, and the agent will list it as a
+`windows` printer. Raw USB via WinUSB is optional and not needed.
+
+### Linux / Raspberry Pi (install.sh)
+
+Either from the source checkout or with a release binary:
 
 ```bash
-# Clone the repository
 git clone https://github.com/OpenEOS-Project/openeos-printer-agent.git
 cd openeos-printer-agent
+sudo ./install.sh --server-url https://api.openeos.de/api
+# or, without Python on the box:
+sudo ./install.sh --server-url https://api.openeos.de/api --binary ./openeos-printer-agent-linux-arm64
+```
 
-# Run the installer (as root)
-sudo ./install.sh
+The script creates the `openeos` user, udev rules for USB receipt printers,
+the systemd unit `openeos-printer` (auto-start) and writes
+`/opt/openeos-printer-agent/config/config.yaml`. Data: `/var/lib/openeos-printer`,
+logs: `/var/log/openeos-printer/agent.log` and `journalctl -u openeos-printer`.
 
-# Configure
-sudo cp /opt/openeos-printer-agent/config/config.example.yaml \
-        /opt/openeos-printer-agent/config/config.yaml
-sudo nano /opt/openeos-printer-agent/config/config.yaml
+Raspberry Pi: use the **arm64** binary on a 64-bit Raspberry Pi OS (Pi 4/5).
+On 32-bit OS or Pi 3 use the source install (`install.sh` without `--binary`).
 
-# Start
-sudo systemctl start openeos-printer
-sudo systemctl status openeos-printer
+### Linux binary, no service
+
+```bash
+curl -LO https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest/download/openeos-printer-agent-linux-x64
+chmod +x openeos-printer-agent-linux-x64
+./openeos-printer-agent-linux-x64 run --server-url https://api.openeos.de/api
+```
+
+Without root the data goes to `~/.local/share/openeos-printer`.
+
+### pip
+
+```bash
+pip install .
+openeos-printer-agent run --server-url https://api.openeos.de/api
 ```
 
 ### Docker
 
 ```bash
 docker build -t openeos-printer-agent .
-docker run -d \
-  --name openeos-printer \
-  -v ./config/config.yaml:/app/config/config.yaml:ro \
-  -p 8080:8080 \
-  --device /dev/usb/lp0 \
-  openeos-printer-agent
+docker run -d --name openeos-printer -p 8080:8080 --network host \
+  -v openeos-printer-data:/var/lib/openeos-printer \
+  -e OPENEOS_PRINTER_DATA_DIR=/var/lib/openeos-printer \
+  openeos-printer-agent run --server-url https://api.openeos.de/api
 ```
 
-### Development
+`--network host` is needed for mDNS and the subnet scan; pass `--device` for USB printers.
 
-```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+## Pairing
 
-# Install dependencies
-pip install -r requirements-dev.txt
+1. Start the agent. It registers itself (`POST /devices/init`) and prints a
+   banner with the **6-digit pairing code** - in the console, in `agent.log`
+   and on `http://localhost:8080`.
+2. In the OpenEOS web app open **Drucker** > **Drucker-Agent verbinden** and
+   enter the code.
+3. The agent notices within a few seconds, connects, and runs its first
+   printer scan. Found printers appear under the agent in the web app;
+   click **Übernehmen** on the ones you want to print on and give them a
+   name, type (receipt/kitchen/label) and paper width.
 
-# Copy and edit config
-cp config/config.example.yaml config/config.yaml
+The device token is stored locally (`device.json`); restarts reuse it.
+`openeos-printer-agent pair` does only the registration + waiting and exits
+once linked - handy before `install-service`.
 
-# Run
-python -m src.main --config config/config.yaml
+## Discovery
 
-# Run tests
-pytest tests/
-```
+Runs at start, every 5 minutes, and when you click **Neu suchen** in the web app.
+
+| Source | How | Reported as |
+|---|---|---|
+| USB | pyusb: USB printer class 7 or known vendor IDs (Epson 04b8, Star 0519, Bixolon 1504, Custom 0dd4, Winbond 0416, GD 28e9, STM 0483, 6868, NXP 1fc9) | `usb`, fingerprint `usb:<vid>:<pid>:<serial|->` |
+| Windows spooler | `win32print.EnumPrinters` (local queues; PDF/XPS/OneNote/Fax skipped) | `windows`, fingerprint `win:<printer name>` |
+| mDNS | `_pdl-datastream._tcp`, `_printer._tcp`, `_ipp._tcp` | `network`, fingerprint `net:<mac>` (or `net:<ip>`) |
+| Port scan | only with "auch Netzwerk durchsuchen": TCP 9100 on the local /24, 300 ms per host, ESC/POS `GS I` model query | `network` |
+
+MAC addresses come from the neighbour table (`ip neigh` / `arp -a`) so a
+printer keeps its identity when DHCP hands out a new IP. Printers the scan
+cannot see (other subnet, VLAN) can be created manually in the web app with
+IP and port.
 
 ## Configuration
 
-See `config/config.example.yaml` for all options. Key settings:
+Only `server_url` is required. Full example: `config/config.example.yaml`.
 
-| Setting | Description |
-|---------|-------------|
-| `server.url` | OpenEOS API server URL |
-| `server.device_token` | Device authentication token (from admin panel). Optional — leave unset to use self-registration instead. |
-| `printers[].connection_type` | `usb`, `network`, or `bluetooth` |
-| `printers[].paper_width` | `80` (80mm) or `58` (58mm) |
+```yaml
+server_url: "https://api.openeos.de/api"
+logging:
+  level: INFO
+local_server:
+  port: 8080
+discovery:
+  interval_s: 300
+  # subnet: "192.168.1.0/24"   # which /24 to port-scan (default: own interface)
+cash_drawer_pin: 2
+```
 
-## Self-Registration
+Lookup order: `--config FILE`, `<data dir>/config.yaml`, `./config/config.yaml`,
+`/etc/openeos-printer/config.yaml`. `--server-url` on the command line wins
+over the file and, when no file exists yet, is written to `<data dir>/config.yaml`.
 
-If `server.device_token` is not configured, the agent registers itself with the backend instead of requiring a pre-provisioned token:
+Environment overrides: `OPENEOS_PRINTER_DATA_DIR`, `OPENEOS_PRINTER_LOG_DIR`.
 
-1. On startup, the agent checks for a token in `server.device_token`, then in the persistent token file (`device_token_file`, default `/var/lib/openeos-printer/device.json`).
-2. If neither is found, it calls `POST /devices/init` with a suggested name and `deviceType: "printer_agent"`, and receives a device token plus a 6-digit **verification code**.
-3. The verification code is shown in the agent logs (and on the local status page) and the token is persisted to the token file for future restarts.
-4. An organization admin enters the verification code in the OpenEOS dashboard to approve the device and assign it to their organization.
-5. The agent polls `GET /devices/status` until the device is verified, then connects via WebSocket and becomes available for selection when adding a printer under **Drucker** in the dashboard.
+## CLI
+
+```
+openeos-printer-agent run [--server-url URL] [--config FILE] [--dummy-printer] [--subnet-scan] [--log-level DEBUG]
+openeos-printer-agent pair [--server-url URL]      # register, show code, exit once linked
+openeos-printer-agent status [--json]              # ask the running agent (local status API)
+openeos-printer-agent install-service [--server-url URL]   # Windows, as Administrator
+openeos-printer-agent remove-service                       # Windows, as Administrator
+openeos-printer-agent --version
+```
+
+`python -m src.main ...` works the same from a checkout.
+
+## Testing without hardware
+
+**Dummy printers** - every adopted printer is backed by an in-memory ESC/POS
+buffer; the rendered ticket is written to the log as text:
+
+```bash
+openeos-printer-agent run --server-url https://api.staging.openeos.de/api --dummy-printer
+```
+
+**Network printer emulator** - `tools/fake_printer.py` listens on TCP 9100,
+answers the `GS I` model query (so discovery shows "OPENEOS FAKE-9100") and
+logs every job it receives as readable text (standard library only, Python 3.8+):
+
+```bash
+python tools/fake_printer.py                        # 0.0.0.0:9100
+python tools/fake_printer.py --port 9101 --log-file /tmp/fake-printer.log --model "TM-T88V"
+```
+
+Then in the web app: "Neu suchen" with network scan finds it (or create it
+manually with the host's IP and port), adopt it, test print - the ticket
+shows up in the emulator's output.
+
+## Status page
+
+`http://<agent-ip>:8080` shows connection state, adopted printers and their
+status, queue counters, the last discovery result and system metrics.
+JSON: `/api/status`, `/api/printers`, `/api/discovery`, `/api/jobs`, `/health`.
+
+## Troubleshooting
+
+**USB printer not found (Linux)**
+```bash
+lsusb                                   # is it there? note the ID xxxx:yyyy
+ls -l /dev/bus/usb/*/*                  # group should be plugdev after install.sh
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo journalctl -u openeos-printer -n 50
+```
+If the vendor ID is not in `/etc/udev/rules.d/99-openeos-printer.rules`, add a
+line for it (same pattern) and reload. Without the rule the agent still lists
+the printer (IDs only, no serial) but cannot print to it.
+
+**USB printer not found (Windows)** - the agent uses the spooler. Install the
+printer in Windows (vendor driver or "Generic / Text Only" on the USB port),
+print a Windows test page, then "Neu suchen". Virtual printers are hidden.
+
+**Network printer not found** - mDNS needs UDP 5353 (multicast) and the port
+scan needs outgoing TCP 9100 to the LAN; both can be blocked by a firewall or
+by a VPN that owns the default route. Set `discovery.subnet` to the printer's
+/24 or create the printer manually by IP. The printer must allow raw printing
+on port 9100 (sometimes called "RAW" or "JetDirect").
+
+**Agent shows as offline** - check `agent.log` / `journalctl`, the status page,
+and that `server_url` includes `/api`. The agent reconnects by itself; the
+device token is in `device.json` in the data directory. Delete that file to
+pair again with a new code (also remove the old agent in the web app).
+
+**Windows service does not start** - run the exe with `run` in a console to
+see the error; `install-service` must be run as Administrator; logs in
+`%ProgramData%\OpenEOS Printer Agent\logs`.
+
+## Development
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+TZ=UTC pytest                 # unit + integration tests (fake API in tests/fake_api.py)
+ruff check . && ruff format --check . && mypy src
+pip install -r requirements-build.txt && pyinstaller openeos-printer-agent.spec   # dist/openeos-printer-agent
+```
+
+Releases: push a tag `v*` - the workflow builds the three binaries, adds
+`SHA256SUMS` and attaches them to a GitHub release. The version lives in
+`src/version.py` (`pyproject.toml` reads it).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│            OpenEOS Backend (NestJS)          │
-│    Socket.io  ──────────────────────────     │
-└─────────┬──────────────────────┬────────────┘
-          │ printerJob           │ printerHeartbeat
-          │ printerJobComplete   │ printerJobFailed
-          ▼                      ▲
-┌─────────────────────────────────────────────┐
-│          Printer Agent (Python)              │
-│                                              │
-│  WebSocketClient ──► JobQueue ──► Renderer   │
-│       │                  │           │       │
-│  SystemMonitor     TemplateEngine  ESC/POS   │
-│       │                              │       │
-│  LocalServer                     Printer(s)  │
-└─────────────────────────────────────────────┘
+OpenEOS API  <--REST (x-device-token)-->  DeviceApiClient   GET printers/templates, POST printers/discovered
+             <--Socket.io-------------->  WebSocketClient   printerJob / printerConfigUpdate / printerDiscover
+                                                             agentHeartbeat / printerJobComplete|Failed
+                                               |
+   DiscoveryService (usb, spooler, mdns, portscan, neighbours)
+   PrinterManager (escpos Usb | Network | Win32Raw | Dummy)  <-  JobQueue + JobStore (SQLite)  <-  TemplateEngine
+   LocalServer :8080
 ```
 
-## Status Page
+## Supported printers
 
-Access `http://<agent-ip>:8080` for a real-time status page showing:
-- Server connection status
-- Printer statuses with color indicators
-- Queue statistics
-- System metrics (CPU, memory, disk, network)
-
-## Troubleshooting
-
-### Printer not detected (USB)
-
-```bash
-# Check USB devices
-lsusb | grep -i epson
-
-# Check permissions
-ls -la /dev/usb/lp*
-
-# Reload udev rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-### Service won't start
-
-```bash
-# Check logs
-sudo journalctl -u openeos-printer -n 50
-
-# Test config
-python -m src.main --config config/config.yaml
-```
-
-### Connection issues
-
-- Verify `device_token` in config matches the token in the OpenEOS admin panel
-- Check network connectivity to the API server
-- Check the status page at http://localhost:8080
-
-## Supported Printers
-
-| Brand | Models | Connection |
-|-------|--------|-----------|
-| Epson | TM-T20III, TM-T88V/VI, TM-M30 | USB, Network |
-| Star | TSP143III, TSP654II | USB, Network |
-| Bixolon | SRP-350III, SRP-380 | USB, Network |
+Any ESC/POS printer. Tested models include Epson TM-T20/T88/m30, Star
+TSP143/TSP654, Bixolon SRP-350/380, and common 58 mm no-name USB printers.
 
 ## License
 
-Copyright (C) 2026 LUXCODE by Lukas Lukic-Spitznagel and contributors.
-
-Licensed under the GNU Affero General Public License v3.0 or (at your option) any later version (`AGPL-3.0-or-later`), see [LICENSE](LICENSE) and [NOTICE](NOTICE). Earlier versions declared the MIT License in `pyproject.toml`; see NOTICE.
-
-## Security
-
-Please report vulnerabilities privately via GitHub (**Security → Report a vulnerability**) or as described in the [organization security policy](https://github.com/OpenEOS-Project/.github/blob/main/SECURITY.md).
-
+AGPL-3.0-or-later - see `LICENSE` and `NOTICE`.

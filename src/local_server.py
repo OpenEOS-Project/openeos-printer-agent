@@ -1,17 +1,23 @@
+import html
 import logging
+import socket
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from aiohttp import web
 
-from .version import __version__
+from .version import get_version
 
 if TYPE_CHECKING:
     from .config import AppConfig
     from .device_registrar import DeviceRegistrar
+    from .discovery import DiscoveryService
     from .job_queue import JobQueue
     from .printer_manager import PrinterManager
     from .system_monitor import SystemMonitor
     from .websocket_client import WebSocketClient
+
+__version__ = get_version()
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +43,10 @@ SETUP_HTML = """<!DOCTYPE html>
 <body>
 <div class="container">
   <h1>OpenEOS Printer Agent</h1>
-  <p class="instructions">Geben Sie diesen Code im OpenEOS Dashboard ein:</p>
+  <p class="instructions">Gib diesen Code in der OpenEOS Web-App unter <strong>Drucker &rarr; Drucker-Agent verbinden</strong> ein:</p>
   <div class="code">{verification_code}</div>
   <p class="status"><span class="spinner"></span>Warte auf Verknuepfung...</p>
+  <p class="meta">Rechner: {hostname}</p>
   <p class="meta">Server: {server_url}</p>
   <p class="meta">v{version} &middot; Auto-Refresh alle 3 Sekunden</p>
 </div>
@@ -107,7 +114,7 @@ STATUS_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <h1>OpenEOS Printer Agent</h1>
-<p class="meta">v{version} &middot; {agent_name} ({agent_id})</p>
+<p class="meta">v{version} &middot; {hostname} &middot; Device {device_id}</p>
 
 <div class="card">
   <h2>Server Connection</h2>
@@ -124,6 +131,12 @@ STATUS_HTML = """<!DOCTYPE html>
 <div class="card">
   <h2>Queue Statistics</h2>
   {queue_table}
+</div>
+
+<div class="card">
+  <h2>Discovered Printers</h2>
+  <p class="meta">Last scan: {last_scan} &middot; Capabilities: {capabilities}</p>
+  {discovery_table}
 </div>
 
 <div class="card">
@@ -154,6 +167,7 @@ class LocalServer:
         printer_manager: Optional["PrinterManager"] = None,
         job_queue: Optional["JobQueue"] = None,
         ws_client: Optional["WebSocketClient"] = None,
+        discovery: Optional["DiscoveryService"] = None,
     ) -> None:
         self._config = config
         self._system_monitor = system_monitor
@@ -161,20 +175,28 @@ class LocalServer:
         self._printer_manager = printer_manager
         self._job_queue = job_queue
         self._ws_client = ws_client
+        self._discovery = discovery
         self._app = web.Application()
         self._runner: web.AppRunner | None = None
         self._setup_routes()
+
+    def set_device_registrar(self, device_registrar: "DeviceRegistrar") -> None:
+        """Registrar is created after the server starts (pairing code page)."""
+        self._device_registrar = device_registrar
 
     def set_components(
         self,
         printer_manager: "PrinterManager",
         job_queue: "JobQueue",
         ws_client: "WebSocketClient",
+        discovery: Optional["DiscoveryService"] = None,
     ) -> None:
         """Set components after they are initialized."""
         self._printer_manager = printer_manager
         self._job_queue = job_queue
         self._ws_client = ws_client
+        if discovery is not None:
+            self._discovery = discovery
 
     def _setup_routes(self) -> None:
         self._app.router.add_get("/", self._handle_status_page)
@@ -182,6 +204,7 @@ class LocalServer:
         self._app.router.add_get("/api/printers", self._handle_api_printers)
         self._app.router.add_get("/api/jobs", self._handle_api_jobs)
         self._app.router.add_get("/api/system", self._handle_api_system)
+        self._app.router.add_get("/api/discovery", self._handle_api_discovery)
         self._app.router.add_get("/health", self._handle_health)
 
     async def start(self) -> None:
@@ -221,9 +244,10 @@ class LocalServer:
         sys_info = await self._get_system_info()
         data = {
             "agent": {
-                "id": self._config.agent.id,
-                "name": self._config.agent.name,
+                "deviceId": self._device_registrar.device_id if self._device_registrar else None,
+                "hostname": socket.gethostname(),
                 "version": __version__,
+                "organization": self._device_registrar.organization_name if self._device_registrar else None,
             },
             "connection": {
                 "connected": self._ws_client.is_connected if self._ws_client else False,
@@ -231,9 +255,15 @@ class LocalServer:
             },
             "printers": self._printer_manager.get_all_statuses() if self._printer_manager else [],
             "queue": self._job_queue.get_queue_stats() if self._job_queue else {},
+            "discovery": self._discovery.get_status_dict() if self._discovery else None,
             "system": sys_info,
         }
         return web.json_response(data)
+
+    async def _handle_api_discovery(self, request: web.Request) -> web.Response:
+        if self._discovery:
+            return web.json_response(self._discovery.get_status_dict())
+        return web.json_response({"printers": [], "lastScanAt": None, "lastError": None, "capabilities": {}})
 
     async def _handle_api_printers(self, request: web.Request) -> web.Response:
         if self._printer_manager:
@@ -251,23 +281,24 @@ class LocalServer:
     async def _handle_status_page(self, request: web.Request) -> web.Response:
         # Setup mode: show verification code
         if self._device_registrar and self._device_registrar.status == "pending":
-            html = SETUP_HTML.format(
+            page = SETUP_HTML.format(
                 verification_code=self._device_registrar.verification_code or "------",
-                server_url=self._config.server.url,
+                server_url=html.escape(self._config.server.url),
+                hostname=html.escape(socket.gethostname()),
                 version=__version__,
             )
-            return web.Response(text=html, content_type="text/html")
+            return web.Response(text=page, content_type="text/html")
 
         # Waiting for org assignment
         if self._device_registrar and self._device_registrar.status == "waiting_for_org":
-            html = WAITING_FOR_ORG_HTML.format(
+            page = WAITING_FOR_ORG_HTML.format(
                 device_id=self._device_registrar.device_id or "unknown",
                 conn_class="connected" if (self._ws_client and self._ws_client.is_connected) else "disconnected",
                 conn_status="Verbunden" if (self._ws_client and self._ws_client.is_connected) else "Getrennt",
-                server_url=self._config.server.url,
+                server_url=html.escape(self._config.server.url),
                 version=__version__,
             )
-            return web.Response(text=html, content_type="text/html")
+            return web.Response(text=page, content_type="text/html")
 
         # Normal operational mode
         sys_info = await self._get_system_info()
@@ -279,12 +310,40 @@ class LocalServer:
             rows = ""
             for p in printers:
                 status_cls = f"status-{p['status']}"
-                rows += f"<tr><td>{p['name']}</td><td>{p['connectionType']}</td>"
+                rows += f"<tr><td>{html.escape(str(p['name']))}</td><td>{html.escape(str(p['connectionType']))}</td>"
                 rows += f"<td><span class='status {status_cls}'>{p['status']}</span></td>"
-                rows += f"<td>{p.get('lastError') or '-'}</td></tr>"
+                rows += f"<td>{html.escape(str(p.get('lastError') or '-'))}</td></tr>"
             printers_table = f"<table><tr><th>Name</th><th>Type</th><th>Status</th><th>Error</th></tr>{rows}</table>"
         else:
-            printers_table = "<p>No printers configured</p>"
+            printers_table = "<p>No printers adopted yet - use 'Gefundene Drucker' in the web app.</p>"
+
+        # Build discovery table
+        discovery = self._discovery.get_status_dict() if self._discovery else None
+        if discovery and discovery["printers"]:
+            d_rows = ""
+            for d in discovery["printers"]:
+                details = d.get("details", {})
+                where = details.get("ipAddress") or details.get("windowsPrinterName") or ""
+                if details.get("usbVendorId"):
+                    where = f"USB {details['usbVendorId']}:{details.get('usbProductId', '')}"
+                d_rows += (
+                    f"<tr><td>{html.escape(str(d['displayName']))}</td><td>{html.escape(str(d['connectionType']))}</td>"
+                )
+                d_rows += (
+                    f"<td>{html.escape(str(where))}</td><td><code>{html.escape(str(d['fingerprint']))}</code></td>"
+                )
+                d_rows += f"<td>{html.escape(str(d['discoveredVia']))}</td></tr>"
+            discovery_table = f"<table><tr><th>Name</th><th>Type</th><th>Where</th><th>Fingerprint</th><th>Via</th></tr>{d_rows}</table>"
+        elif discovery and discovery.get("lastError"):
+            discovery_table = f"<p>Scan problem: {html.escape(str(discovery['lastError']))}</p>"
+        else:
+            discovery_table = "<p>No printers found yet</p>"
+        if discovery and discovery.get("lastScanAt"):
+            last_scan = time.strftime("%H:%M:%S", time.localtime(discovery["lastScanAt"]))
+        else:
+            last_scan = "-"
+        caps = discovery.get("capabilities", {}) if discovery else {}
+        capabilities = ", ".join(k for k, v in caps.items() if v) or "-"
 
         # Build queue table
         if queue_stats:
@@ -318,16 +377,19 @@ class LocalServer:
         if self._device_registrar:
             org_name = self._device_registrar.organization_name or "N/A"
 
-        html = STATUS_HTML.format(
+        page = STATUS_HTML.format(
             version=__version__,
-            agent_name=self._config.agent.name,
-            agent_id=self._config.agent.id,
+            hostname=html.escape(socket.gethostname()),
+            device_id=html.escape(str(self._device_registrar.device_id or "-")) if self._device_registrar else "-",
             conn_class="connected" if (self._ws_client and self._ws_client.is_connected) else "disconnected",
             conn_status="Connected" if (self._ws_client and self._ws_client.is_connected) else "Disconnected",
-            server_url=self._config.server.url,
-            org_name=org_name,
+            server_url=html.escape(self._config.server.url),
+            org_name=html.escape(org_name),
             printers_table=printers_table,
             queue_table=queue_table,
+            discovery_table=discovery_table,
+            last_scan=last_scan,
+            capabilities=capabilities,
             cpu_temp=cpu_temp,
             cpu_percent=sys_info.get("cpu_percent", "N/A"),
             mem_used=mem.get("used_mb", "N/A"),
@@ -339,4 +401,4 @@ class LocalServer:
             network_ip=net.get("ip_address", "N/A"),
             uptime=uptime,
         )
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(text=page, content_type="text/html")

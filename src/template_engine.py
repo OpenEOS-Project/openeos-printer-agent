@@ -1,13 +1,18 @@
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
+from .paths import default_data_dir, resource_dir
+
 logger = logging.getLogger(__name__)
 
-BUILTIN_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
-CACHE_DIR = Path(__file__).parent.parent / "cache" / "templates"
+BUILTIN_TEMPLATES_DIR = resource_dir() / "templates"
+# Server template overrides are cached on disk so a restart without network
+# still prints with the organisation's layouts. None = resolve the platform
+# data directory at construction time (tests point this at a temp dir).
+CACHE_DIR: Optional[Path] = None
 
 
 def _filter_strftime(value: Any, fmt: str = "%d.%m.%Y %H:%M") -> str:
@@ -55,8 +60,9 @@ class TemplateEngine:
     3. Built-in default templates (shipped with agent)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cache_dir: Optional[Path] = None) -> None:
         self._server_templates: dict[str, str] = {}
+        self._cache_dir = cache_dir or CACHE_DIR or (default_data_dir() / "templates-cache")
         self._env = self._create_env()
         self._load_cached_templates()
 
@@ -88,9 +94,9 @@ class TemplateEngine:
 
     def _load_cached_templates(self) -> None:
         """Load cached server templates from disk."""
-        if not CACHE_DIR.exists():
+        if not self._cache_dir.exists():
             return
-        for path in CACHE_DIR.glob("*.jinja2"):
+        for path in self._cache_dir.glob("*.jinja2"):
             name = path.stem
             try:
                 self._server_templates[name] = path.read_text(encoding="utf-8")
@@ -120,8 +126,8 @@ class TemplateEngine:
             self._server_templates[name] = content
             # Persist to disk
             try:
-                CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                cache_path = CACHE_DIR / f"{name}.jinja2"
+                self._cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = self._cache_dir / f"{name}.jinja2"
                 cache_path.write_text(content, encoding="utf-8")
                 logger.info(f"Cached server template: {name}")
             except Exception as e:

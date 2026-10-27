@@ -1,7 +1,6 @@
 import pytest
-from pydantic import ValidationError
 
-from src.config import AppConfig, PrinterConfig, ServerConfig
+from src.config import AppConfig, ServerConfig, load_config, write_minimal_config
 
 
 class TestServerConfig:
@@ -23,72 +22,105 @@ class TestServerConfig:
         assert cfg.device_token is None
 
 
-class TestPrinterConfig:
-    def test_valid_network_printer(self, sample_printer_config):
-        assert sample_printer_config.connectionType == "network"
-        assert sample_printer_config.ipAddress == "192.168.1.100"
-        assert sample_printer_config.paperWidth == 80
-
-    def test_valid_usb_printer(self, sample_usb_printer_config):
-        assert sample_usb_printer_config.connectionType == "usb"
-        assert sample_usb_printer_config.usbVendorId == "0x04b8"
-
-    def test_missing_local_id(self):
-        with pytest.raises(ValidationError, match="localId"):
-            PrinterConfig(
-                name="Bad Printer",
-                connectionType="network",
-            )
-
-    def test_connection_type_rejects_invalid_value(self):
-        # connectionType is now a Literal — a typo like "serial" must fail
-        # loudly at startup instead of silently producing a printer that
-        # never connects.
-        with pytest.raises(ValidationError, match="connectionType"):
-            PrinterConfig(localId="p1", name="Bad Printer", connectionType="serial")
-
-    def test_connection_type_accepts_valid_values(self):
-        for value in ("usb", "network", "bluetooth"):
-            cfg = PrinterConfig(localId="p1", name="Printer", connectionType=value)
-            assert cfg.connectionType == value
-
-    def test_paper_width_rejects_invalid_value(self):
-        # paperWidth is now constrained to 58/80 mm — anything else must
-        # fail loudly at startup instead of producing a garbled layout.
-        with pytest.raises(ValidationError, match="paperWidth"):
-            PrinterConfig(localId="p1", name="Bad Printer", connectionType="network", paperWidth=72)
-
-    def test_paper_width_accepts_valid_values(self):
-        for value in (58, 80):
-            cfg = PrinterConfig(localId="p1", name="Printer", connectionType="usb", paperWidth=value)
-            assert cfg.paperWidth == value
-
-    def test_default_paper_width(self):
-        cfg = PrinterConfig(localId="p1", name="P", connectionType="usb")
-        assert cfg.paperWidth == 80
-
-    def test_58mm_paper(self):
-        cfg = PrinterConfig(localId="p1", name="P", connectionType="usb", paperWidth=58)
-        assert cfg.paperWidth == 58
-
-
 class TestAppConfig:
-    def test_full_config(self, sample_config):
-        assert sample_config.agent.id == "test-agent"
-        assert len(sample_config.printers) == 1
-        assert sample_config.printers[0].name == "Test Printer"
+    def test_flat_server_url_wins(self):
+        # The minimal config is just `server_url:`; it must land in server.url
+        # (and a trailing slash must not end up doubled in request URLs).
+        cfg = AppConfig(server_url="https://api.example.com/api/")
+        assert cfg.server.url == "https://api.example.com/api"
+        assert cfg.server_url == "https://api.example.com/api/"
+
+    def test_nested_server_block_still_works(self):
+        cfg = AppConfig(server=ServerConfig(url="http://nested:3000"))
+        assert cfg.server.url == "http://nested:3000"
+        assert cfg.server_url == "http://nested:3000"
+
+    def test_flat_device_token(self):
+        cfg = AppConfig(server_url="http://x", device_token="tok")
+        assert cfg.server.device_token == "tok"
 
     def test_defaults(self):
-        cfg = AppConfig(
-            server=ServerConfig(url="http://localhost:3000", device_token="tok"),
-        )
-        assert cfg.agent.id == "agent-01"
+        cfg = AppConfig(server_url="http://localhost:3000")
         assert cfg.logging.level == "INFO"
         assert cfg.local_server.enabled is True
-        assert cfg.sentry.enabled is False
+        assert cfg.discovery.interval_s == 300
+        assert cfg.discovery.subnet_scan_on_schedule is False
+        assert cfg.dummy_printer is False
+        assert cfg.cash_drawer_pin == 2
 
-    def test_no_printers(self):
+    def test_derived_paths_follow_data_dir(self, tmp_path):
+        cfg = AppConfig(server_url="http://x", data_dir=str(tmp_path / "d"))
+        assert cfg.device_token_path == tmp_path / "d" / "device.json"
+        assert cfg.job_store_path == tmp_path / "d" / "print-jobs.db"
+        assert cfg.template_cache_path == tmp_path / "d" / "templates-cache"
+
+    def test_explicit_file_overrides(self, tmp_path):
         cfg = AppConfig(
-            server=ServerConfig(url="http://localhost:3000", device_token="tok"),
+            server_url="http://x",
+            device_token_file=str(tmp_path / "t.json"),
+            job_store_file=str(tmp_path / "j.db"),
         )
-        assert cfg.printers == []
+        assert cfg.device_token_path == tmp_path / "t.json"
+        assert cfg.job_store_path == tmp_path / "j.db"
+
+    def test_log_file_from_dir_and_from_file(self, tmp_path):
+        cfg = AppConfig(server_url="http://x", logging={"dir": str(tmp_path)})
+        assert cfg.log_file == tmp_path / "agent.log"
+        cfg2 = AppConfig(server_url="http://x", logging={"file": str(tmp_path / "x" / "a.log")})
+        assert cfg2.log_file == tmp_path / "x" / "a.log"
+        assert cfg2.log_path == tmp_path / "x"
+
+    def test_env_data_dir_default(self, tmp_path):
+        # conftest points OPENEOS_PRINTER_DATA_DIR at tmp_path/data
+        cfg = AppConfig(server_url="http://x")
+        assert cfg.data_path == tmp_path / "data"
+
+
+class TestLoadConfig:
+    def test_minimal_yaml(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("server_url: https://api.test/api\n")
+        cfg = load_config(str(path))
+        assert cfg.server.url == "https://api.test/api"
+
+    def test_legacy_printers_block_is_ignored(self, tmp_path, capsys):
+        # Old installs carry a printers list; it must neither crash nor be used.
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "server:\n  url: http://legacy:3000\n"
+            "agent:\n  id: pr01\n  name: X\n"
+            "sentry:\n  enabled: false\n"
+            "printers:\n  - localId: a\n    name: A\n    connectionType: usb\n"
+        )
+        cfg = load_config(str(path))
+        assert cfg.server.url == "http://legacy:3000"
+        assert not hasattr(cfg, "printers")
+        assert "printers" in capsys.readouterr().err
+
+    def test_overrides_beat_file(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("server_url: http://file\n")
+        cfg = load_config(str(path), {"server_url": "http://flag", "dummy_printer": True})
+        assert cfg.server.url == "http://flag"
+        assert cfg.dummy_printer is True
+
+    def test_missing_explicit_file_exits(self, tmp_path):
+        with pytest.raises(SystemExit):
+            load_config(str(tmp_path / "nope.yaml"))
+
+    def test_no_file_uses_defaults(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        cfg = load_config(None)
+        assert cfg.server.url == "http://localhost:3000"
+
+    def test_data_dir_config_is_found_first(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "config.yaml").write_text("server_url: http://from-data-dir\n")
+        cfg = load_config(None)
+        assert cfg.server.url == "http://from-data-dir"
+
+    def test_write_minimal_config_roundtrip(self, tmp_path):
+        target = tmp_path / "sub" / "config.yaml"
+        write_minimal_config(target, "https://api.example.com/api")
+        assert load_config(str(target)).server.url == "https://api.example.com/api"

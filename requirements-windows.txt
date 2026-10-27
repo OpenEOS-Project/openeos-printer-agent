@@ -1,0 +1,5 @@
+# Extras for the Windows build: pywin32 (spooler + service), libusb for the
+# optional pyusb path (WinUSB-bound printers).
+-r requirements.txt
+pywin32>=306
+libusb-package>=1.0.26

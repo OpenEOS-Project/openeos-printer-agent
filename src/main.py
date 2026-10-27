@@ -1,12 +1,13 @@
-import argparse
 import asyncio
 import logging
 import signal
-from pathlib import Path
-from typing import Any
+import sys
+from typing import Any, Optional
 
-from .config import load_config
+from .api_client import DeviceApiClient
+from .config import AppConfig, load_config
 from .device_registrar import DeviceRegistrar
+from .discovery import DiscoveryService
 from .job_queue import JobQueue
 from .job_store import JobStore
 from .local_server import LocalServer
@@ -14,7 +15,7 @@ from .printer_manager import PrinterManager
 from .system_monitor import SystemMonitor
 from .template_engine import TemplateEngine
 from .utils import setup_logging
-from .version import __version__
+from .version import get_version
 from .websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
@@ -23,20 +24,23 @@ logger = logging.getLogger(__name__)
 class PrinterAgent:
     """Main orchestrator for the OpenEOS Printer Agent."""
 
-    def __init__(self, config_path: str | None = None) -> None:
-        self._config = load_config(config_path)
+    def __init__(self, config_path: Optional[str] = None, config: Optional[AppConfig] = None) -> None:
+        self._config = config if config is not None else load_config(config_path)
         self._shutdown_event = asyncio.Event()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Components (initialized in start())
-        self._system_monitor: SystemMonitor | None = None
-        self._device_registrar: DeviceRegistrar | None = None
-        self._printer_manager: PrinterManager | None = None
-        self._template_engine: TemplateEngine | None = None
-        self._job_queue: JobQueue | None = None
-        self._job_store: JobStore | None = None
-        self._ws_client: WebSocketClient | None = None
-        self._local_server: LocalServer | None = None
-        self._health_check_task: asyncio.Task[None] | None = None
+        self._system_monitor: Optional[SystemMonitor] = None
+        self._device_registrar: Optional[DeviceRegistrar] = None
+        self._api_client: Optional[DeviceApiClient] = None
+        self._printer_manager: Optional[PrinterManager] = None
+        self._template_engine: Optional[TemplateEngine] = None
+        self._job_queue: Optional[JobQueue] = None
+        self._job_store: Optional[JobStore] = None
+        self._ws_client: Optional[WebSocketClient] = None
+        self._local_server: Optional[LocalServer] = None
+        self._discovery: Optional[DiscoveryService] = None
+        self._health_check_task: Optional[asyncio.Task[None]] = None
 
         # Jobs the backend replays immediately on (re)connect can arrive before
         # the job queue + workers exist (connect happens several startup steps
@@ -45,93 +49,107 @@ class PrinterAgent:
         self._early_jobs: list[dict[str, Any]] = []
         self._accepting_jobs = False
 
+    @property
+    def config(self) -> AppConfig:
+        return self._config
+
+    @property
+    def discovery(self) -> Optional[DiscoveryService]:
+        return self._discovery
+
+    @property
+    def printer_manager(self) -> Optional[PrinterManager]:
+        return self._printer_manager
+
     async def start(self) -> None:
         """Start the printer agent with all components."""
         config = self._config
 
         # 1. Logging
-        setup_logging(config.logging)
-        logger.info(f"OpenEOS Printer Agent v{__version__} starting...")
-        logger.info(f"Agent: {config.agent.name} ({config.agent.id})")
+        setup_logging(config)
+        logger.info(f"OpenEOS Printer Agent v{get_version()} starting...")
+        logger.info(f"Server: {config.server.url}")
+        logger.info(f"Data directory: {config.data_path}")
 
-        # 2. Sentry (optional)
-        if config.sentry.enabled and config.sentry.dsn:
-            try:
-                import sentry_sdk
-
-                sentry_sdk.init(
-                    dsn=config.sentry.dsn,
-                    environment=config.sentry.environment,
-                    traces_sample_rate=config.sentry.traces_sample_rate,
-                    release=f"openeos-printer-agent@{__version__}",
-                )
-                logger.info("Sentry initialized")
-            except Exception as e:
-                logger.warning(f"Sentry init failed: {e}")
-
-        # 3. System Monitor
+        # 2. System Monitor
         self._system_monitor = SystemMonitor()
 
-        # 4. Device Registration - ensure we have a device_token
-        self._device_registrar = DeviceRegistrar(config)
-        device_token = await self._device_registrar.ensure_registered()
-
-        # 5. Local HTTP Server (starts early to show setup/waiting page)
+        # 3. Local HTTP Server (starts early to show the pairing code)
         if config.local_server.enabled:
             self._local_server = LocalServer(
                 config=config,
                 system_monitor=self._system_monitor,
-                device_registrar=self._device_registrar,
             )
-            await self._local_server.start()
+            try:
+                await self._local_server.start()
+            except OSError as e:
+                # Port taken (second instance, another app): the agent still
+                # works, only the status page is missing.
+                logger.warning(f"Local status server not started: {e}")
+                self._local_server = None
 
-        # 6. Wait for device verification (blocks until org is assigned)
+        # 4. Device Registration - ensure we have a device_token
+        self._device_registrar = DeviceRegistrar(config)
+        if self._local_server:
+            self._local_server.set_device_registrar(self._device_registrar)
+        device_token = await self._device_registrar.ensure_registered()
+
+        # 5. Wait for device verification (blocks until org is assigned)
         if self._device_registrar.status != "verified":
             logger.info("Device not yet verified, waiting for verification...")
             await self._device_registrar.wait_for_verification()
 
         logger.info(f"Device verified! Organization: {self._device_registrar.organization_name}")
+        device_id = self._device_registrar.device_id or "unknown"
 
-        # 7. WebSocket Client (needs device_token, created before PrinterManager for config fetch)
+        # 6. REST client for the device API
+        self._api_client = DeviceApiClient(config.server.url, device_token)
+
+        # 7. Discovery service (started once the socket is up, see below)
+        self._discovery = DiscoveryService(config.discovery, reporter=self._api_client.report_discovered)
+
+        # 8. WebSocket Client
         self._ws_client = WebSocketClient(
             config=config,
             device_token=device_token,
+            device_id=device_id,
             system_monitor=self._system_monitor,
             on_print_job=self._handle_print_job,
             on_template_update=self._handle_template_update,
             on_config_update=self._handle_config_update,
             on_cash_drawer=self._handle_cash_drawer,
+            on_discover=self._handle_discover,
             on_ready=self._handle_server_ready,
+            capabilities=self._discovery.capabilities,
         )
 
-        # 8. Connect WebSocket
+        # 9. Connect WebSocket
         try:
             await self._ws_client.connect()
         except Exception as e:
             logger.error(f"Initial WebSocket connection failed: {e}")
             logger.info("Will retry automatically...")
 
-        # 9. Fetch printer configuration from backend (REST API)
-        printer_configs = await self._ws_client.fetch_printer_config()
+        # 10. Fetch the adopted printers from the backend (REST API)
+        printer_configs = await self._api_client.get_printers()
 
-        # 10. Printer Manager (initialized with backend config)
-        self._printer_manager = PrinterManager()
+        # 11. Printer Manager (initialized with backend config)
+        self._printer_manager = PrinterManager(dummy=config.dummy_printer)
         await self._printer_manager.initialize(printer_configs)
 
         # Wire printer manager into WebSocket client for heartbeats
         self._ws_client.set_printer_manager(self._printer_manager)
 
-        # 11. Template Engine + fetch server templates
-        self._template_engine = TemplateEngine()
-        templates = await self._ws_client.fetch_templates()
+        # 12. Template Engine + fetch server templates
+        self._template_engine = TemplateEngine(cache_dir=config.template_cache_path)
+        templates = await self._api_client.get_templates()
         if templates:
             self._template_engine.update_server_templates(templates)
         logger.info(f"Templates available: {self._template_engine.get_available_templates()}")
 
-        # 12. Job Store (crash-safe queue persistence) + Job Queue
-        job_store_path = config.job_store_file or str(Path(config.device_token_file).parent / "print-jobs.db")
+        # 13. Job Store (crash-safe queue persistence) + Job Queue
         try:
-            self._job_store = JobStore(job_store_path)
+            self._job_store = JobStore(str(config.job_store_path))
         except Exception as e:
             logger.warning(f"Job store unavailable ({e}) — print jobs are not crash-safe")
             self._job_store = None
@@ -149,16 +167,24 @@ class PrinterAgent:
         # Queue + workers are live — accept jobs and flush anything the backend
         # replayed while we were still starting up.
         await self._drain_early_jobs()
+        # The socket's "connected" event fired before the job store existed
+        # (step 9 vs. 13), so outcomes stored by a previous run have not been
+        # delivered yet - do it now instead of waiting for the next reconnect.
+        await self._handle_server_ready()
 
-        # 13. Update local server with full components
+        # 14. Update local server with full components
         if self._local_server:
             self._local_server.set_components(
                 printer_manager=self._printer_manager,
                 job_queue=self._job_queue,
                 ws_client=self._ws_client,
+                discovery=self._discovery,
             )
 
-        # 14. Periodic health checks
+        # 15. Discovery: first scan now, then every 5 minutes / on request
+        self._discovery.start()
+
+        # 16. Periodic health checks
         self._health_check_task = asyncio.create_task(self._health_check_loop())
 
         logger.info("Printer Agent fully started")
@@ -250,17 +276,23 @@ class PrinterAgent:
         except Exception as e:
             logger.error(f"Failed to open cash drawer on printer {printer_id}: {e}")
 
+    async def _handle_discover(self, subnet_scan: bool) -> None:
+        """``printerDiscover`` from the server: queue an immediate scan."""
+        if self._discovery:
+            self._discovery.trigger(subnet_scan=subnet_scan)
+
     async def _handle_config_update(self, data: dict[str, Any]) -> None:
         """Callback when printerConfigUpdate is received via WebSocket.
 
-        Re-fetches printer config from backend and reconfigures PrinterManager.
+        Re-fetches the adopted printers from the backend and reconfigures
+        the PrinterManager.
         """
         logger.info("Handling printer config update...")
-        if not self._ws_client or not self._printer_manager:
+        if not self._api_client or not self._ws_client or not self._printer_manager:
             return
 
         try:
-            printer_configs = await self._ws_client.fetch_printer_config()
+            printer_configs = await self._api_client.get_printers()
             await self._printer_manager.reconfigure(printer_configs)
 
             # Restart job queue workers for new printer set. In-memory queues
@@ -268,7 +300,7 @@ class PrinterAgent:
             # re-enqueued below.
             if self._job_queue:
                 # _template_engine wird in start() gesetzt, bevor _job_queue
-                # je einen Wert bekommt (Schritt 11 vor Schritt 12), und
+                # je einen Wert bekommt (Schritt 12 vor Schritt 13), und
                 # danach nie wieder auf None zurückgesetzt. Ist _job_queue
                 # hier gesetzt, MUSS _template_engine es also auch sein - die
                 # explizite Prüfung macht das für mypy sichtbar und wandelt
@@ -298,10 +330,11 @@ class PrinterAgent:
                         printer_manager=self._printer_manager,
                         job_queue=self._job_queue,
                         ws_client=self._ws_client,
+                        discovery=self._discovery,
                     )
 
             # Also re-fetch templates in case org changed
-            templates = await self._ws_client.fetch_templates()
+            templates = await self._api_client.get_templates()
             if templates and self._template_engine:
                 self._template_engine.update_server_templates(templates)
 
@@ -313,13 +346,15 @@ class PrinterAgent:
         """Graceful shutdown in reverse order."""
         logger.info("Shutting down Printer Agent...")
 
-        # 1. Stop health checks
+        # 1. Stop health checks + discovery
         if self._health_check_task:
             self._health_check_task.cancel()
             try:
                 await self._health_check_task
             except asyncio.CancelledError:
                 pass
+        if self._discovery:
+            await self._discovery.stop()
 
         # 2. Disconnect WebSocket
         if self._ws_client:
@@ -341,48 +376,88 @@ class PrinterAgent:
         if self._job_store:
             self._job_store.close()
 
+        # 7. Close the REST session
+        if self._api_client:
+            await self._api_client.close()
+
         logger.info("Printer Agent stopped")
+
+    # -- shutdown requests ---------------------------------------------------
+
+    def request_shutdown(self) -> None:
+        """Ask the running agent to stop (call from the event loop thread)."""
+        self._shutdown_event.set()
+
+    def request_shutdown_threadsafe(self) -> None:
+        """Ask the running agent to stop from another thread (Windows
+        service control handler, signal handlers on Windows)."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._shutdown_event.set)
+
+    def _install_signal_handlers(self) -> None:
+        """SIGTERM/SIGINT -> graceful shutdown, on every platform.
+
+        ``loop.add_signal_handler`` is Unix-only (NotImplementedError on
+        Windows' ProactorEventLoop). There we fall back to ``signal.signal``
+        and hop back onto the loop thread via call_soon_threadsafe.
+        """
+        loop = asyncio.get_running_loop()
+        signals = [signal.SIGTERM, signal.SIGINT]
+        if sys.platform.startswith("win") and hasattr(signal, "SIGBREAK"):
+            signals.append(signal.SIGBREAK)
+
+        try:
+            for sig in signals:
+                loop.add_signal_handler(sig, self.request_shutdown)
+            return
+        except (NotImplementedError, RuntimeError, AttributeError):
+            pass
+
+        def _handler(signum: int, frame: Any) -> None:
+            self.request_shutdown_threadsafe()
+
+        for sig in signals:
+            try:
+                signal.signal(sig, _handler)
+            except (ValueError, OSError):
+                # Not the main thread (Windows service worker): the service
+                # control handler stops us instead.
+                pass
 
     async def run(self) -> None:
         """Start and run until shutdown signal."""
-        await self.start()
+        self._loop = asyncio.get_running_loop()
+        self._install_signal_handlers()
 
-        # Wait for shutdown
-        loop = asyncio.get_event_loop()
-
-        def _signal_handler() -> None:
-            self._shutdown_event.set()
-
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, _signal_handler)
-
-        await self._shutdown_event.wait()
+        start_task = asyncio.create_task(self.start())
+        stop_task = asyncio.create_task(self._shutdown_event.wait())
+        # Shutdown must also work while start() still waits for pairing or
+        # for an unreachable server - hence the race instead of a plain await.
+        done, _ = await asyncio.wait({start_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        if start_task in done:
+            exc = start_task.exception()
+            if exc is not None:
+                logger.error(f"Startup failed: {exc}")
+                await self.shutdown()
+                raise exc
+            await self._shutdown_event.wait()
+        else:
+            start_task.cancel()
+            try:
+                await start_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        stop_task.cancel()
         await self.shutdown()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="OpenEOS Printer Agent")
-    parser.add_argument(
-        "--config",
-        "-c",
-        type=str,
-        default=None,
-        help="Path to config.yaml",
-    )
-    parser.add_argument(
-        "--version",
-        "-v",
-        action="version",
-        version=f"openeos-printer-agent {__version__}",
-    )
-    args = parser.parse_args()
+    """Entry point for ``python -m src.main``; delegates to the CLI."""
+    from .cli import main as cli_main
 
-    agent = PrinterAgent(config_path=args.config)
-
-    try:
-        asyncio.run(agent.run())
-    except KeyboardInterrupt:
-        pass
+    cli_main()
 
 
 if __name__ == "__main__":

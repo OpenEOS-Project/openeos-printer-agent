@@ -4,12 +4,41 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openeos-printer-agent"
-version = "0.1.0"
-description = "OpenEOS Printer Agent - ESC/POS printer control via WebSocket"
+dynamic = ["version"]
+description = "OpenEOS Printer Agent - finds USB/network receipt printers and prints ESC/POS jobs from the OpenEOS platform"
 requires-python = ">=3.11"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "LUXCODE by Lukas Lukic-Spitznagel"}]
+# Kept in sync with requirements.txt (install.sh / Docker use the txt file,
+# `pip install .` and PyInstaller use this list).
+dependencies = [
+    "python-socketio[asyncio]>=5.17.0,<6.0",
+    "aiohttp>=3.9,<4.0",
+    "python-escpos>=3.1,<4.0",
+    "pyusb>=1.2,<2.0",
+    "zeroconf>=0.130,<1.0",
+    "platformdirs>=4.0,<5.0",
+    "Jinja2>=3.1.6,<4.0",
+    "PyYAML>=6.0,<7.0",
+    "Pillow>=10.0,<13.0",
+    "qrcode[pil]>=8.2,<9.0",
+    "psutil>=5.9,<6.0",
+    "pydantic>=2.0,<3.0",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.scripts]
+openeos-printer-agent = "src.cli:main"
+
+[tool.setuptools]
+packages = ["src", "src.discovery"]
+
+[tool.setuptools.dynamic]
+version = {attr = "src.version.__version__"}
+
+[tool.setuptools.package-data]
+src = ["templates/*.jinja2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -49,6 +78,13 @@ module = [
     "socketio",
     "barcode",
     "barcode.*",
+    "usb.*",
+    "libusb_package",
+    "win32print",
+    "win32service",
+    "win32serviceutil",
+    "win32event",
+    "servicemanager",
 ]
 ignore_missing_imports = true
 
@@ -59,3 +95,10 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "src.websocket_client"
 disallow_untyped_decorators = false
+
+# win32serviceutil.ServiceFramework ist ungetypt; die Service-Klasse erbt
+# davon und ist auf Linux gar nicht importierbar.
+[[tool.mypy.overrides]]
+module = "src.windows_service"
+disallow_subclassing_any = true
+warn_unused_ignores = false
