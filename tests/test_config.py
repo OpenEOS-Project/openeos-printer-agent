@@ -1,6 +1,6 @@
 import pytest
 
-from src.config import AppConfig, ServerConfig, load_config, write_minimal_config
+from src.config import DEFAULT_SERVER_URL, AppConfig, ServerConfig, load_config, write_minimal_config
 
 
 class TestServerConfig:
@@ -108,10 +108,34 @@ class TestLoadConfig:
         with pytest.raises(SystemExit):
             load_config(str(tmp_path / "nope.yaml"))
 
-    def test_no_file_uses_defaults(self, tmp_path, monkeypatch):
+    def test_no_file_uses_hosted_service(self, tmp_path, monkeypatch):
+        # Double-clicking the EXE / running the binary without arguments
+        # must be able to pair: no config, no flag -> hosted OpenEOS.
         monkeypatch.chdir(tmp_path)
         cfg = load_config(None)
-        assert cfg.server.url == "http://localhost:3000"
+        assert cfg.server.url == DEFAULT_SERVER_URL == "https://api.openeos.de/api"
+        assert cfg.server_url_source == "default"
+        hint = cfg.describe_server_url()
+        assert "default" in hint and "--server-url" in hint and "config.yaml" in hint
+
+    def test_server_url_source_file_and_flag(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("server_url: https://self.hosted/api\n")
+        cfg = load_config(str(path))
+        assert cfg.server.url == "https://self.hosted/api"
+        assert cfg.server_url_source == f"config file {path}"
+        assert "self.hosted" in cfg.describe_server_url()
+
+        cfg = load_config(str(path), {"server_url": "https://flag.host/api"})
+        assert cfg.server.url == "https://flag.host/api"
+        assert cfg.server_url_source == "--server-url"
+
+    def test_file_without_server_url_falls_back_to_default(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("logging:\n  level: DEBUG\n")
+        cfg = load_config(str(path))
+        assert cfg.server.url == DEFAULT_SERVER_URL
+        assert cfg.server_url_source == "default"
 
     def test_data_dir_config_is_found_first(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

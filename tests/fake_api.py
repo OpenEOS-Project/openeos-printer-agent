@@ -16,8 +16,15 @@ from aiohttp import web
 
 
 class FakeApi:
-    def __init__(self) -> None:
+    """``reject_mode`` controls how the socket turns an unknown/blocked
+    token away: ``"kick"`` mirrors the real gateway (accept, emit
+    ``error`` {"message": "Authentication required"}, disconnect),
+    ``"refuse"`` rejects the namespace (client sees ``connect_error``)."""
+
+    def __init__(self, reject_mode: str = "kick") -> None:
+        self.reject_mode = reject_mode
         self.devices: dict[str, dict[str, Any]] = {}  # token -> device row
+        self.status_changes: list[dict[str, Any]] = []  # deviceStatusChanged emitted
         self.discovered_reports: list[dict[str, Any]] = []  # every POST body
         self.discovered_rows: dict[str, dict[str, Any]] = {}  # fingerprint -> row
         self.printers: list[dict[str, Any]] = []  # adopted printers
@@ -78,6 +85,34 @@ class FakeApi:
         row["organizationName"] = organization_name
         row["verificationCode"] = None
 
+    def remove(self) -> str:
+        """Admin removes the agent in the web app: the row is deleted, the
+        token is unknown from now on. Like the real backend the socket is
+        left alone - the agent notices on its next REST call or reconnect."""
+        token = self.token
+        del self.devices[token]
+        return token
+
+    async def block(self) -> None:
+        """``blockDevice``: status blocked, inactive, status event to the socket."""
+        row = self.devices[self.token]
+        row["status"] = "blocked"
+        row["isActive"] = False
+        await self._notify_status(row)
+
+    async def unblock(self) -> None:
+        row = self.devices[self.token]
+        row["status"] = "verified"
+        row["isActive"] = True
+        await self._notify_status(row)
+
+    async def _notify_status(self, row: dict[str, Any]) -> None:
+        payload = {"deviceId": row["deviceId"], "status": row["status"]}
+        self.status_changes.append(payload)
+        sid = self.sids.get(row["deviceToken"])
+        if sid:
+            await self._sio.emit("deviceStatusChanged", payload, to=sid)
+
     def adopt(self, fingerprint: str, printer_id: str, **overrides: Any) -> dict[str, Any]:
         """Create a Printer row from a discovered entry (like the org API's adopt)."""
         row = self.discovered_rows[fingerprint]
@@ -111,8 +146,9 @@ class FakeApi:
     async def emit_config_update(self) -> None:
         await self._sio.emit("printerConfigUpdate", {}, to=self.sids[self.token])
 
-    async def emit_discover(self, subnet_scan: bool) -> Any:
-        return await self._sio.call("printerDiscover", {"subnetScan": subnet_scan}, to=self.sids[self.token], timeout=5)
+    async def emit_discover(self, subnet_scan: bool, token: Optional[str] = None) -> Any:
+        sid = self.sids[token or self.token]
+        return await self._sio.call("printerDiscover", {"subnetScan": subnet_scan}, to=sid, timeout=5)
 
     async def send_job(self, job: dict[str, Any]) -> Any:
         return await self._sio.call("printerJob", job, to=self.sids[self.token], timeout=10)
@@ -141,6 +177,7 @@ class FakeApi:
             "deviceToken": token,
             "verificationCode": f"{secrets.randbelow(900000) + 100000}",
             "status": "pending",
+            "isActive": True,
             "organizationId": None,
             "organizationName": None,
             "suggestedName": body.get("suggestedName"),
@@ -159,6 +196,8 @@ class FakeApi:
         )
 
     async def _status(self, request: web.Request) -> web.Response:
+        # Like the real getDeviceStatus: a blocked (inactive) device still
+        # gets its status; only an unknown token is a 401.
         device = self._device(request)
         if device is None:
             return web.json_response({"message": "unauthorized"}, status=401)
@@ -175,7 +214,7 @@ class FakeApi:
 
     def _require_verified(self, request: web.Request) -> Optional[web.Response]:
         device = self._device(request)
-        if device is None or device["status"] != "verified":
+        if device is None or device["status"] != "verified" or not device.get("isActive", True):
             return web.json_response({"message": "unauthorized"}, status=401)
         return None
 
@@ -226,13 +265,20 @@ class FakeApi:
     def _socket_handlers(self) -> None:
         sio = self._sio
 
+        async def kick(sid: str) -> None:
+            await asyncio.sleep(0.05)
+            await sio.emit("error", {"message": "Authentication required"}, to=sid)
+            await sio.disconnect(sid)
+
         @sio.event
         async def connect(sid: str, environ: dict[str, Any], auth: Optional[dict[str, Any]]) -> bool:
             token = (auth or {}).get("deviceToken", "")
             device = self.devices.get(token)
-            if device is None or device["status"] != "verified":
-                await sio.emit("error", {"message": "Authentication required"}, to=sid)
-                return False
+            if device is None or device["status"] != "verified" or not device.get("isActive", True):
+                if self.reject_mode == "refuse":
+                    raise socketio.exceptions.ConnectionRefusedError("Authentication required")
+                asyncio.get_running_loop().create_task(kick(sid))
+                return True
             self.sids[token] = sid
             await sio.emit(
                 "connected",

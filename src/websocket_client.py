@@ -12,6 +12,10 @@ from .version import get_version
 logger = logging.getLogger(__name__)
 
 CapabilitiesProvider = Callable[[], dict[str, bool]]
+# Called (synchronously, from inside a socket event) when the server turns
+# the connection away or reports a status change; the agent decides what
+# that means by asking GET /devices/status.
+AuthErrorCallback = Callable[[str], None]
 
 
 class WebSocketClient:
@@ -30,6 +34,7 @@ class WebSocketClient:
         on_discover: Optional[Callable[..., Any]] = None,
         on_ready: Optional[Callable[..., Any]] = None,
         capabilities: Optional[CapabilitiesProvider] = None,
+        on_auth_error: Optional[AuthErrorCallback] = None,
     ) -> None:
         self._config = config
         self._device_token = device_token
@@ -44,14 +49,9 @@ class WebSocketClient:
         self._on_discover = on_discover
         self._on_ready = on_ready
         self._capabilities = capabilities
+        self._on_auth_error = on_auth_error
 
-        self._sio = socketio.AsyncClient(
-            reconnection=True,
-            reconnection_attempts=0,  # unlimited
-            reconnection_delay=config.server.reconnect_interval,
-            reconnection_delay_max=config.server.reconnect_max_interval,
-            logger=False,
-        )
+        self._sio = self._new_client()
         self._connected = False
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._server_config: dict[str, Any] = {}
@@ -61,9 +61,22 @@ class WebSocketClient:
 
         self._register_handlers()
 
+    def _new_client(self) -> socketio.AsyncClient:
+        return socketio.AsyncClient(
+            reconnection=True,
+            reconnection_attempts=0,  # unlimited
+            reconnection_delay=self._config.server.reconnect_interval,
+            reconnection_delay_max=self._config.server.reconnect_max_interval,
+            logger=False,
+        )
+
     def set_printer_manager(self, printer_manager: PrinterManager) -> None:
         """Set the printer manager after it is initialized."""
         self._printer_manager = printer_manager
+
+    def _auth_error(self, reason: str) -> None:
+        if self._on_auth_error:
+            self._on_auth_error(reason)
 
     def _register_handlers(self) -> None:
         sio = self._sio
@@ -72,6 +85,14 @@ class WebSocketClient:
         async def connect() -> None:
             self._connected = True
             logger.info(f"Connected to server: {self._config.server.url}")
+
+        @sio.event
+        async def connect_error(data: Any = None) -> None:
+            # Fires both when the server actively refuses the namespace
+            # (CONNECT_ERROR packet, e.g. unknown token) and when the
+            # transport fails. The agent sorts that out with one status call.
+            logger.warning(f"Connection refused by server: {data}")
+            self._auth_error(f"socket connect_error: {data}")
 
         @sio.event
         async def disconnect() -> None:
@@ -93,7 +114,20 @@ class WebSocketClient:
 
         @sio.on("error")
         async def on_error(data: dict[str, Any]) -> None:
+            # The gateway answers an unknown/blocked token with
+            # {"message": "Authentication required"} and then drops us.
             logger.error(f"Server error: {data}")
+            message = str(data.get("message", "")) if isinstance(data, dict) else str(data)
+            if "auth" in message.lower():
+                self._auth_error(f"server error: {message}")
+
+        @sio.on("deviceStatusChanged")
+        async def on_device_status_changed(data: dict[str, Any]) -> None:
+            """Admin blocked/unblocked this device in the web app."""
+            status = str(data.get("status", "")) if isinstance(data, dict) else ""
+            logger.info(f"Server reports device status: {status or data}")
+            if status and status != "verified":
+                self._auth_error(f"deviceStatusChanged: {status}")
 
         @sio.on("printerJob")
         async def on_printer_job(data: dict[str, Any]) -> dict[str, bool]:
@@ -152,13 +186,35 @@ class WebSocketClient:
         )
 
     async def disconnect(self) -> None:
-        """Disconnect from server."""
+        """Disconnect from server and stop any pending reconnect attempts."""
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             self._heartbeat_task = None
-        if self._connected:
-            await self._sio.disconnect()
+        try:
+            # shutdown() also aborts the library's reconnect loop, which a
+            # plain disconnect() does not when we are currently offline. The
+            # loop creates its abort event on its first tick - give a task
+            # that was scheduled just now that tick before asking it to stop.
+            await asyncio.sleep(0)
+            await self._sio.shutdown()
+        except Exception as e:
+            logger.debug(f"Socket shutdown: {e}")
         self._connected = False
+
+    async def reconnect_with_token(self, device_token: str, device_id: str) -> None:
+        """After re-pairing: drop the old socket (and its reconnect loop)
+        and connect again with the new token.
+
+        A fresh AsyncClient is used on purpose - python-socketio keeps a
+        finished reconnect task around after ``shutdown()``, which would
+        stop it from reconnecting after the next drop.
+        """
+        await self.disconnect()
+        self._device_token = device_token
+        self._device_id = device_id
+        self._sio = self._new_client()
+        self._register_handlers()
+        await self.connect()
 
     async def wait(self) -> None:
         """Wait until disconnected."""

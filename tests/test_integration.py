@@ -107,7 +107,7 @@ async def test_full_flow(api: FakeApi, stub_scanners, tmp_path, caplog, monkeypa
         # 1. Pairing: the agent registers and shows the code (log + status page)
         await api.wait_for(lambda: api.devices)
         device = api.devices[api.token]
-        assert device["userAgent"].startswith("openeos-printer-agent/0.2.0")
+        assert device["userAgent"].startswith("openeos-printer-agent/0.2.1")
         code = device["verificationCode"]
         assert f"{code[:3]} {code[3:]}" in caplog.text  # banner prints "123 456"
         assert "PAIRING REQUIRED" in caplog.text
@@ -144,7 +144,7 @@ async def test_full_flow(api: FakeApi, stub_scanners, tmp_path, caplog, monkeypa
         await api.wait_for(lambda: api.heartbeats)
         hb = api.heartbeats[0]
         assert set(hb) == {"version", "os", "arch", "hostname", "pythonVersion", "capabilities", "printers"}
-        assert hb["version"] == "0.2.0"
+        assert hb["version"] == "0.2.1"
         assert set(hb["capabilities"]) == {"usb", "mdns", "portscan", "spooler"}
 
         # 4. Adopt in the "web app" -> printerConfigUpdate -> agent fetches it

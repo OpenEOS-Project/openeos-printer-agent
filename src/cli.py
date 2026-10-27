@@ -7,7 +7,10 @@
     openeos-printer-agent remove-service                       (Windows)
 
 Without a subcommand ``run`` is assumed, so the systemd unit's
-``python -m src.main --config ...`` keeps working unchanged.
+``python -m src.main --config ...`` keeps working unchanged. Without any
+config file and without ``--server-url`` the agent talks to the hosted
+service (``config.DEFAULT_SERVER_URL``), so double-clicking the Windows
+EXE is enough to get a pairing code.
 """
 
 import argparse
@@ -134,6 +137,7 @@ def cmd_pair(args: argparse.Namespace) -> int:
 
     config = _load(args)
     setup_logging(config)
+    logger.info(config.describe_server_url())
 
     async def _pair() -> int:
         registrar = DeviceRegistrar(config)
@@ -219,6 +223,7 @@ def cmd_install_service(args: argparse.Namespace) -> int:
     from .windows_service import install_service
 
     config = _load(args)
+    print(config.describe_server_url())
     return install_service(config_path=getattr(args, "config", None), server_url=config.server.url)
 
 

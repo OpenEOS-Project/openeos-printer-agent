@@ -2,11 +2,19 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from typing import Any, Optional
 
 from .api_client import DeviceApiClient
 from .config import AppConfig, load_config
-from .device_registrar import DeviceRegistrar
+from .device_registrar import (
+    REGISTER_RETRY_S,
+    STATUS_BLOCKED,
+    STATUS_INVALID,
+    STATUS_UNREACHABLE,
+    STATUS_VERIFIED,
+    DeviceRegistrar,
+)
 from .discovery import DiscoveryService
 from .job_queue import JobQueue
 from .job_store import JobStore
@@ -19,6 +27,11 @@ from .version import get_version
 from .websocket_client import WebSocketClient
 
 logger = logging.getLogger(__name__)
+
+# A rejected token triggers one GET /devices/status; while the socket
+# library keeps retrying a dead connection every few seconds we do not want
+# a status call per attempt once the answer was "still valid".
+AUTH_CHECK_MIN_INTERVAL_S = 30.0
 
 
 class PrinterAgent:
@@ -49,6 +62,11 @@ class PrinterAgent:
         self._early_jobs: list[dict[str, Any]] = []
         self._accepting_jobs = False
 
+        # Token rejected by the server -> one recovery task at a time
+        # (status check, then re-pair or wait while blocked).
+        self._recovery_task: Optional[asyncio.Task[None]] = None
+        self._last_auth_check = 0.0
+
     @property
     def config(self) -> AppConfig:
         return self._config
@@ -68,7 +86,7 @@ class PrinterAgent:
         # 1. Logging
         setup_logging(config)
         logger.info(f"OpenEOS Printer Agent v{get_version()} starting...")
-        logger.info(f"Server: {config.server.url}")
+        logger.info(config.describe_server_url())
         logger.info(f"Data directory: {config.data_path}")
 
         # 2. System Monitor
@@ -92,18 +110,21 @@ class PrinterAgent:
         self._device_registrar = DeviceRegistrar(config)
         if self._local_server:
             self._local_server.set_device_registrar(self._device_registrar)
-        device_token = await self._device_registrar.ensure_registered()
+        await self._device_registrar.ensure_registered()
 
-        # 5. Wait for device verification (blocks until org is assigned)
-        if self._device_registrar.status != "verified":
+        # 5. Wait for device verification (blocks until the code is entered).
+        # The wait itself re-registers when the stored token turns out to be
+        # stale, so the token is read back afterwards, not before.
+        if self._device_registrar.status != STATUS_VERIFIED:
             logger.info("Device not yet verified, waiting for verification...")
             await self._device_registrar.wait_for_verification()
+        device_token = self._device_registrar.device_token or ""
 
         logger.info(f"Device verified! Organization: {self._device_registrar.organization_name}")
         device_id = self._device_registrar.device_id or "unknown"
 
         # 6. REST client for the device API
-        self._api_client = DeviceApiClient(config.server.url, device_token)
+        self._api_client = DeviceApiClient(config.server.url, device_token, on_unauthorized=self._on_auth_rejected)
 
         # 7. Discovery service (started once the socket is up, see below)
         self._discovery = DiscoveryService(config.discovery, reporter=self._api_client.report_discovered)
@@ -121,6 +142,7 @@ class PrinterAgent:
             on_discover=self._handle_discover,
             on_ready=self._handle_server_ready,
             capabilities=self._discovery.capabilities,
+            on_auth_error=self._on_auth_rejected,
         )
 
         # 9. Connect WebSocket
@@ -188,6 +210,90 @@ class PrinterAgent:
         self._health_check_task = asyncio.create_task(self._health_check_loop())
 
         logger.info("Printer Agent fully started")
+
+    # -- token rejected at runtime --------------------------------------------
+
+    def _on_auth_rejected(self, reason: str) -> None:
+        """Socket refused / REST 401 / status change: find out why, once.
+
+        Called synchronously from inside socket events and REST calls, so
+        the work is handed to a task. Only one recovery runs at a time and
+        a "still valid" verdict is not repeated more often than every
+        ``AUTH_CHECK_MIN_INTERVAL_S``.
+        """
+        if self._recovery_task is not None and not self._recovery_task.done():
+            return
+        if time.monotonic() - self._last_auth_check < AUTH_CHECK_MIN_INTERVAL_S:
+            return
+        self._last_auth_check = time.monotonic()
+        self._recovery_task = asyncio.create_task(self._recover_from_auth_error(reason), name="auth-recovery")
+
+    async def _recover_from_auth_error(self, reason: str) -> None:
+        registrar = self._device_registrar
+        if registrar is None or self._ws_client is None or self._api_client is None:
+            return
+        logger.warning(f"Server rejected the device token ({reason}) - checking the device status")
+        try:
+            result = await registrar.check_status()
+            if result == STATUS_VERIFIED:
+                logger.info("Device token is still valid on the server; treating the rejection as transient")
+                return
+            if result == STATUS_UNREACHABLE:
+                logger.info("Could not verify the device status (server unreachable); checking again on next failure")
+                return
+            await self._resume_pairing(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Recovery after rejected device token failed: {e}")
+            # Let the next rejection try again right away.
+            self._last_auth_check = 0.0
+
+    async def _resume_pairing(self, result: str) -> None:
+        """The device is gone (``invalid``) or blocked on the server: stop
+        talking with the old token, pair again (new code) or wait for the
+        unblock, then reconnect everything with the current token. No restart
+        needed - the Windows service / systemd unit keeps running."""
+        registrar = self._device_registrar
+        ws_client = self._ws_client
+        api_client = self._api_client
+        assert registrar is not None and ws_client is not None and api_client is not None
+
+        # Stop the socket (and its reconnect loop) and the discovery reports;
+        # both would just keep failing with the old token.
+        await ws_client.disconnect()
+        if self._discovery:
+            await self._discovery.stop()
+
+        if result == STATUS_INVALID and not registrar.token_from_config:
+            logger.warning(
+                "This agent was removed in the OpenEOS web app (device token no longer valid). "
+                "Discarding the stored token and starting a new pairing - a new code follows."
+            )
+            registrar.discard_token()
+            await registrar.ensure_registered()  # registers + logs the banner
+        elif result == STATUS_BLOCKED:
+            logger.warning("This agent is blocked in the OpenEOS web app - waiting until it is unblocked")
+        # Shows the code / the blocked page on the status page, waits for the
+        # admin, and handles removal/blocking while waiting on its own.
+        await registrar.wait_for_verification()
+
+        device_token = registrar.device_token or ""
+        device_id = registrar.device_id or "unknown"
+        await api_client.set_device_token(device_token)
+        while True:
+            try:
+                await ws_client.reconnect_with_token(device_token, device_id)
+                break
+            except Exception as e:
+                logger.warning(f"Reconnect after re-pairing failed ({e}); retrying in {REGISTER_RETRY_S:.0f}s")
+                await asyncio.sleep(REGISTER_RETRY_S)
+
+        # Printer set and templates may differ for the new device row.
+        await self._handle_config_update({})
+        if self._discovery:
+            self._discovery.start()
+        logger.info(f"Connected again as device {device_id} (organization: {registrar.organization_name or '-'})")
 
     async def _health_check_loop(self) -> None:
         """Periodic printer health checks (every 60s)."""
@@ -346,13 +452,14 @@ class PrinterAgent:
         """Graceful shutdown in reverse order."""
         logger.info("Shutting down Printer Agent...")
 
-        # 1. Stop health checks + discovery
-        if self._health_check_task:
-            self._health_check_task.cancel()
-            try:
-                await self._health_check_task
-            except asyncio.CancelledError:
-                pass
+        # 1. Stop health checks + discovery (+ a running token recovery)
+        for task in (self._health_check_task, self._recovery_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._discovery:
             await self._discovery.stop()
 
