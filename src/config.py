@@ -74,6 +74,11 @@ class DiscoveryConfig(BaseModel):
     # Also run the port scan on the automatic scans, not only when the web
     # app asks for it. Off by default - it is the noisy part of discovery.
     subnet_scan_on_schedule: bool = False
+    # ESC/POS model query (GS I) sent to every network candidate: connect
+    # and per-reply timeout in seconds, and how many devices are asked at
+    # the same time.
+    probe_timeout_s: float = 1.0
+    probe_concurrency: int = 8
 
 
 class AppConfig(BaseModel):

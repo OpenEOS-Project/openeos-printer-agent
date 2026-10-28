@@ -1,5 +1,6 @@
 """Printer discovery (USB, Windows spooler, mDNS, optional port scan)."""
 
+from .classify import Classification, classify_spooler, classify_usb
 from .service import DiscoveryService, merge_results
 from .types import (
     KNOWN_USB_VENDORS,
@@ -11,6 +12,9 @@ from .types import (
 )
 
 __all__ = [
+    "Classification",
+    "classify_spooler",
+    "classify_usb",
     "DiscoveredPrinter",
     "DiscoveryService",
     "KNOWN_USB_VENDORS",

@@ -9,6 +9,7 @@ ESC/POS sent there only produces garbage documents.
 import logging
 from typing import Any
 
+from .classify import classify_spooler
 from .types import DiscoveredPrinter, windows_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -50,20 +51,21 @@ def describe_printers(entries: list[dict[str, Any]]) -> list[DiscoveredPrinter]:
         port = str(entry.get("pPortName") or "")
         if _is_virtual(name, driver, port):
             continue
-        found.append(
-            DiscoveredPrinter(
-                fingerprint=windows_fingerprint(name),
-                connection_type="windows",
-                display_name=name,
-                discovered_via="spooler",
-                details={
-                    "windowsPrinterName": name,
-                    "driverName": driver or None,
-                    "portName": port or None,
-                    "model": str(entry.get("pComment") or "") or None,
-                },
-            )
+        comment = str(entry.get("pComment") or "") or None
+        printer = DiscoveredPrinter(
+            fingerprint=windows_fingerprint(name),
+            connection_type="windows",
+            display_name=name,
+            discovered_via="spooler",
+            details={
+                "windowsPrinterName": name,
+                "driverName": driver or None,
+                "portName": port or None,
+                "model": comment,
+            },
         )
+        classify_spooler(name, driver or None, comment).apply(printer)
+        found.append(printer)
     return found
 
 

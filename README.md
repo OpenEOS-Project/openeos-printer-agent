@@ -134,15 +134,34 @@ Runs at start, every 5 minutes, and when you click **Neu suchen** in the web app
 
 | Source | How | Reported as |
 |---|---|---|
-| USB | pyusb: USB printer class 7 or known vendor IDs (Epson 04b8, Star 0519, Bixolon 1504, Custom 0dd4, Winbond 0416, GD 28e9, STM 0483, 6868, NXP 1fc9) | `usb`, fingerprint `usb:<vid>:<pid>:<serial|->` |
+| USB | pyusb: USB printer class 7 or known vendor IDs (Epson 04b8, Star 0519, Bixolon 1504, Custom 0dd4, Winbond 0416, GD 28e9, STM 0483, 6868, NXP 1fc9, Citizen 1d90/1343, Seiko 0619, Posiflex 0d3a, Partner Tech 076c) | `usb`, fingerprint `usb:<vid>:<pid>:<serial|->` |
 | Windows spooler | `win32print.EnumPrinters` (local queues; PDF/XPS/OneNote/Fax skipped) | `windows`, fingerprint `win:<printer name>` |
 | mDNS | `_pdl-datastream._tcp`, `_printer._tcp`, `_ipp._tcp` | `network`, fingerprint `net:<mac>` (or `net:<ip>`) |
-| Port scan | only with "auch Netzwerk durchsuchen": TCP 9100 on the local /24, 300 ms per host, ESC/POS `GS I` model query | `network` |
+| Port scan | only with "auch Netzwerk durchsuchen": TCP 9100 on the local /24, 300 ms per host | `network` |
 
 MAC addresses come from the neighbour table (`ip neigh` / `arp -a`) so a
 printer keeps its identity when DHCP hands out a new IP. Printers the scan
 cannot see (other subnet, VLAN) can be created manually in the web app with
 IP and port.
+
+### Classification
+
+Only ESC/POS receipt printers work with the agent, but discovery also sees
+office lasers and label printers. Every candidate therefore carries
+`details.escpos` (`yes` / `no` / `unknown`), `details.kind` (`receipt` /
+`label` / `office` / `unknown`) and a one-line `details.kindReason`; the
+web app hides everything that is neither `receipt`/`label` nor
+`escpos: yes` unless you tick "Alle gefundenen Geräte anzeigen".
+
+| Source | Rule |
+|---|---|
+| Network (mDNS, port scan) | ESC/POS model query `GS I 67` (then `GS I 66`, fallback `GS I 65`), 1 s timeout: an answer is `escpos: yes` / `receipt`; silence is `escpos: no` (`office` when model or hostname names Brother, HP, Canon, Kyocera, Lexmark, Ricoh, Xerox, Konica Minolta, OKI, Samsung or an office model family, else `unknown`). Devices mDNS already identifies as office printers are not queried at all (raw bytes on port 9100 make a laser print a page). |
+| USB | known POS vendor ID = `receipt` / `escpos: yes`; other printer-class devices are classified by their product string or stay `unknown`. |
+| Windows spooler | driver/queue name keywords: `TM-`, `TSP`, `SRP-`, `CT-S`, Custom, `POS`, Receipt, Generic / Text Only -> `receipt`; Brother QL/DK/P-touch, Zebra, Dymo -> `label`; office vendors -> `office`; else `unknown`. |
+
+Each network device is queried once per scan; the verdict is cached for the
+agent's lifetime so the 5-minute runs stay quiet. **Neu suchen** in the web
+app clears the cache and queries everything again.
 
 ## Configuration
 

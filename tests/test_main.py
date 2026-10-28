@@ -67,7 +67,7 @@ class TestDiscoverCallback:
         agent = PrinterAgent(config=sample_config)
         agent._discovery = MagicMock()
         await agent._handle_discover(True)
-        agent._discovery.trigger.assert_called_once_with(subnet_scan=True)
+        agent._discovery.trigger.assert_called_once_with(subnet_scan=True, reprobe=True)
 
 
 class TestShutdownRequests:

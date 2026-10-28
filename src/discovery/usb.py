@@ -10,6 +10,7 @@ tolerated and the device is still reported with IDs only.
 import logging
 from typing import Any, Optional
 
+from .classify import classify_usb
 from .types import KNOWN_USB_VENDORS, USB_PRINTER_CLASS, DiscoveredPrinter, hex4, usb_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ def describe_device(device: Any) -> Optional[DiscoveredPrinter]:
     vendor_name = manufacturer or KNOWN_USB_VENDORS.get(vendor_id, f"USB {vendor_id:04x}")
     display = f"{vendor_name} {product}".strip() if product else f"{vendor_name} {product_id:04x}"
 
-    return DiscoveredPrinter(
+    printer = DiscoveredPrinter(
         fingerprint=usb_fingerprint(vendor_id, product_id, serial),
         connection_type="usb",
         display_name=display,
@@ -106,6 +107,8 @@ def describe_device(device: Any) -> Optional[DiscoveredPrinter]:
             "usbProductId": hex4(product_id),
         },
     )
+    classify_usb(vendor_id, manufacturer, product).apply(printer)
+    return printer
 
 
 def scan_usb() -> list[DiscoveredPrinter]:

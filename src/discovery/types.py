@@ -24,6 +24,11 @@ KNOWN_USB_VENDORS: dict[int, str] = {
     0x0483: "STMicroelectronics",
     0x6868: "Generic (6868)",
     0x1FC9: "NXP",
+    0x1D90: "Citizen",
+    0x1343: "Citizen Systems",
+    0x0619: "Seiko Instruments",
+    0x0D3A: "Posiflex",
+    0x076C: "Partner Tech",
 }
 
 USB_PRINTER_CLASS = 7
@@ -45,6 +50,10 @@ DETAIL_KEYS = (
     "macAddress",
     "windowsPrinterName",
     "driverName",
+    # classification (see classify.py)
+    "escpos",
+    "kind",
+    "kindReason",
 )
 
 

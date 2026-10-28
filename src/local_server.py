@@ -375,8 +375,10 @@ class LocalServer:
                 d_rows += (
                     f"<td>{html.escape(str(where))}</td><td><code>{html.escape(str(d['fingerprint']))}</code></td>"
                 )
-                d_rows += f"<td>{html.escape(str(d['discoveredVia']))}</td></tr>"
-            discovery_table = f"<table><tr><th>Name</th><th>Type</th><th>Where</th><th>Fingerprint</th><th>Via</th></tr>{d_rows}</table>"
+                kind = f"{details.get('kind', '-')} / ESC/POS {details.get('escpos', '-')}"
+                d_rows += f"<td>{html.escape(str(d['discoveredVia']))}</td>"
+                d_rows += f'<td title="{html.escape(str(details.get("kindReason", "")))}">{html.escape(kind)}</td></tr>'
+            discovery_table = f"<table><tr><th>Name</th><th>Type</th><th>Where</th><th>Fingerprint</th><th>Via</th><th>Kind</th></tr>{d_rows}</table>"
         elif discovery and discovery.get("lastError"):
             discovery_table = f"<p>Scan problem: {html.escape(str(discovery['lastError']))}</p>"
         else:
