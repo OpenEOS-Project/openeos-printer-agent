@@ -156,15 +156,17 @@ async def test_removal_with_server_disconnect_repairs_within_seconds(api: FakeAp
         elapsed = time.monotonic() - started
         assert elapsed < 5, f"new pairing took {elapsed:.1f}s"
         assert len(api.discovered_reports) == reports_before  # not the 401 path
+        new_device = api.devices[api.token]
+        assert len(api.devices) == 1
+        token_file = tmp_path / "data" / "device.json"
+        # The registrar logs "Device registered" before it writes the file,
+        # so once the file holds the new token the log is complete.
+        await api.wait_for(lambda: token_file.exists() and api.token in token_file.read_text())
         # Hang-up -> status check -> removed -> new registration, in that order
         hangup = caplog.text.index("Server closed the connection")
         checked = caplog.text.index("checking the device status", hangup)
         removed = caplog.text.index("removed in the OpenEOS web app", checked)
         assert "Device registered" in caplog.text[removed:]
-        new_device = api.devices[api.token]
-        assert len(api.devices) == 1
-        token_file = tmp_path / "data" / "device.json"
-        await api.wait_for(lambda: token_file.exists() and api.token in token_file.read_text())
         async with aiohttp.ClientSession() as session:
             async with session.get(f"http://127.0.0.1:{status_port}/api/status") as resp:
                 body = await resp.json()
