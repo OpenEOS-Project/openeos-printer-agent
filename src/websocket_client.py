@@ -14,8 +14,17 @@ logger = logging.getLogger(__name__)
 CapabilitiesProvider = Callable[[], dict[str, bool]]
 # Called (synchronously, from inside a socket event) when the server turns
 # the connection away or reports a status change; the agent decides what
-# that means by asking GET /devices/status.
-AuthErrorCallback = Callable[[str], None]
+# that means by asking GET /devices/status. ``urgent`` marks the one event
+# that must not be throttled: the server hung up on an authenticated
+# session (e.g. "Agent entfernen" in the web app).
+AuthErrorCallback = Callable[[str, bool], None]
+
+# python-socketio does not reconnect after a server-initiated disconnect
+# ("io server disconnect"), so the client has to do it itself: first wait
+# this long (a removal check should be prompt, a restarting server needs a
+# moment), then double the delay up to ``reconnect_max_interval``.
+SERVER_DISCONNECT_RETRY_S = 2.0
+SERVER_DISCONNECT = socketio.AsyncClient.reason.SERVER_DISCONNECT
 
 
 class WebSocketClient:
@@ -55,6 +64,15 @@ class WebSocketClient:
         self._connected = False
         self._heartbeat_task: Optional[asyncio.Task[None]] = None
         self._server_config: dict[str, Any] = {}
+        # True once the server confirmed the token (``connected`` event);
+        # a server-side hang-up of such a session is worth an immediate
+        # status check, repeated kicks of a stale token are not.
+        self._authenticated = False
+        # Set by disconnect(): a disconnect we asked for must not trigger
+        # the reconnect loop.
+        self._closing = False
+        self._reconnect_task: Optional[asyncio.Task[None]] = None
+        self._reconnect_wanted = False
 
         # Set lazily after PrinterManager is created
         self._printer_manager: Optional[PrinterManager] = None
@@ -74,9 +92,9 @@ class WebSocketClient:
         """Set the printer manager after it is initialized."""
         self._printer_manager = printer_manager
 
-    def _auth_error(self, reason: str) -> None:
+    def _auth_error(self, reason: str, urgent: bool = False) -> None:
         if self._on_auth_error:
-            self._on_auth_error(reason)
+            self._on_auth_error(reason, urgent)
 
     def _register_handlers(self) -> None:
         sio = self._sio
@@ -95,16 +113,24 @@ class WebSocketClient:
             self._auth_error(f"socket connect_error: {data}")
 
         @sio.event
-        async def disconnect() -> None:
+        async def disconnect(reason: str = "") -> None:
             self._connected = False
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
                 self._heartbeat_task = None
-            logger.warning("Disconnected from server")
+            if reason == SERVER_DISCONNECT and not self._closing:
+                # The library gives up here (no reconnect loop, no
+                # connect_error): removed/blocked in the web app, or the
+                # server closed sockets on a restart. Find out which.
+                logger.warning("Server closed the connection - checking the device status and reconnecting")
+                self._schedule_reconnect()
+                return
+            logger.warning(f"Disconnected from server ({reason or 'unknown reason'})")
 
         @sio.on("connected")
         async def on_connected(data: dict[str, Any]) -> None:
             logger.info(f"Server confirmed authentication: {data}")
+            self._authenticated = True
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -177,6 +203,7 @@ class WebSocketClient:
         """Connect to the backend server."""
         url = self._config.server.url
         logger.info(f"Connecting to {url}...")
+        self._closing = False
 
         await self._sio.connect(
             url,
@@ -187,9 +214,18 @@ class WebSocketClient:
 
     async def disconnect(self) -> None:
         """Disconnect from server and stop any pending reconnect attempts."""
+        self._closing = True
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
             self._heartbeat_task = None
+        task = self._reconnect_task
+        self._reconnect_task = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         try:
             # shutdown() also aborts the library's reconnect loop, which a
             # plain disconnect() does not when we are currently offline. The
@@ -197,6 +233,11 @@ class WebSocketClient:
             # that was scheduled just now that tick before asking it to stop.
             await asyncio.sleep(0)
             await self._sio.shutdown()
+            if self._sio.eio.state == "connected" and not self._sio.connected:
+                # A connect() that was cancelled between the namespace join
+                # and the library's own "connected" flag leaves the
+                # transport open; shutdown() does not know about it.
+                await self._sio.disconnect()
         except Exception as e:
             logger.debug(f"Socket shutdown: {e}")
         self._connected = False
@@ -219,6 +260,41 @@ class WebSocketClient:
     async def wait(self) -> None:
         """Wait until disconnected."""
         await self._sio.wait()
+
+    def _schedule_reconnect(self) -> None:
+        self._reconnect_wanted = True
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(self._reconnect_after_server_disconnect(), name="ws-reconnect")
+
+    async def _reconnect_after_server_disconnect(self) -> None:
+        """Our replacement for the library's reconnect loop after the server
+        hung up. Every round first asks the agent to check the device status
+        (removed -> re-pair, blocked -> wait; both end this loop through
+        disconnect()), then connects again. A still-verified device simply
+        comes back; an unreachable server keeps the loop going with backoff.
+        Only the first check after an authenticated session is urgent, a
+        stale token that gets kicked on every attempt is throttled by the
+        agent like any other repeated rejection."""
+        delay = SERVER_DISCONNECT_RETRY_S
+        urgent = self._authenticated
+        self._authenticated = False
+        while self._reconnect_wanted and not self._closing:
+            self._reconnect_wanted = False
+            await asyncio.sleep(delay)
+            if self._closing:
+                return
+            self._auth_error("server closed the connection", urgent=urgent)
+            urgent = False
+            delay = min(delay * 2, self._config.server.reconnect_max_interval)
+            try:
+                await self.connect()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if self._closing:
+                    return
+                logger.warning(f"Reconnect failed ({e}); next attempt in {delay:.0f}s")
+                self._reconnect_wanted = True
 
     @property
     def is_connected(self) -> bool:

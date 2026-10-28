@@ -117,9 +117,10 @@ once linked - handy before `install-service`.
 
 **Removing or blocking the agent** (web app: **Drucker** > **Drucker-Agent**):
 
-- *Agent entfernen*: the server forgets the token. The running agent notices
-  (immediately on the next reconnect, otherwise with its next report to the
-  server, at most a few minutes), logs it, deletes the stale `device.json`
+- *Agent entfernen*: the server forgets the token and closes the agent's
+  connection. The running agent notices within a few seconds (it re-checks
+  its status as soon as the server hangs up; a 401 on a later request is
+  the fallback), logs it, deletes the stale `device.json`
   and **automatically shows a new pairing code** - in the log and on
   `http://localhost:8080`. No restart, no file to delete by hand. The same
   happens when the agent starts with a token the server no longer knows.

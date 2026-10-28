@@ -9,11 +9,12 @@ Everything runs against tests/fake_api.py on loopback.
 import asyncio
 import json
 import socket
+import time
 
 import aiohttp
 import pytest
 
-from src import device_registrar, main
+from src import device_registrar, main, websocket_client
 from src.config import AppConfig, DiscoveryConfig, LocalServerConfig, LoggingConfig
 from src.device_registrar import (
     STATUS_BLOCKED,
@@ -49,6 +50,11 @@ def fast_polls(monkeypatch):
     monkeypatch.setattr(device_registrar, "BLOCKED_POLL_S", 0.2)
     monkeypatch.setattr(device_registrar, "REGISTER_RETRY_S", 0.2)
     monkeypatch.setattr(main, "AUTH_CHECK_MIN_INTERVAL_S", 0.0)
+
+
+@pytest.fixture
+def fast_reconnect(monkeypatch):
+    monkeypatch.setattr(websocket_client, "SERVER_DISCONNECT_RETRY_S", 0.1)
 
 
 def _config(api: FakeApi, tmp_path, status_port: int | None = None) -> AppConfig:
@@ -125,6 +131,81 @@ async def test_removed_device_repairs_without_restart(api: FakeApi, stub_scanner
         assert body.get("mode") != "setup"
         assert body["agent"]["organization"] == "Neuer Verein"
         assert body["connection"]["connected"] is True
+    finally:
+        await _stop(agent, task)
+
+
+async def test_removal_with_server_disconnect_repairs_within_seconds(api: FakeApi, stub_scanners, tmp_path, caplog):  # noqa: F811
+    """Issue #35: the API closes the socket when the agent is removed, and
+    python-socketio neither reconnects nor fires connect_error after a
+    server-initiated disconnect. The agent used to wait for the next
+    discovery report (up to 5 min) to see the 401; now the hang-up itself
+    triggers the status check. Runs with the production delay (2 s) and no
+    throttling tweaks on purpose."""
+    status_port = _free_port()
+    config = _config(api, tmp_path, status_port)  # discovery interval 3600 s
+    agent, task = await _start_paired(api, config)
+    try:
+        await api.wait_for(lambda: api.discovered_reports)
+        reports_before = len(api.discovered_reports)
+        old_token = api.remove()
+        started = time.monotonic()
+        await api.disconnect_socket(old_token)
+
+        await api.wait_for(lambda: api.devices and api.token != old_token, timeout=6)
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, f"new pairing took {elapsed:.1f}s"
+        assert len(api.discovered_reports) == reports_before  # not the 401 path
+        # Hang-up -> status check -> removed -> new registration, in that order
+        hangup = caplog.text.index("Server closed the connection")
+        checked = caplog.text.index("checking the device status", hangup)
+        removed = caplog.text.index("removed in the OpenEOS web app", checked)
+        assert "Device registered" in caplog.text[removed:]
+        new_device = api.devices[api.token]
+        assert len(api.devices) == 1
+        token_file = tmp_path / "data" / "device.json"
+        await api.wait_for(lambda: token_file.exists() and api.token in token_file.read_text())
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{status_port}/api/status") as resp:
+                body = await resp.json()
+        assert body["mode"] == "setup" and body["verificationCode"] == new_device["verificationCode"]
+
+        # Re-pairing works as before: new token, socket back, discovery again.
+        heartbeats_before = len(api.heartbeats)
+        api.verify(organization_name="Neuer Verein")
+        await api.wait_for(lambda: api.token in api.sids and len(api.heartbeats) > heartbeats_before)
+        await api.wait_for(lambda: len(api.discovered_reports) > reports_before)
+        assert "Connected again as device" in caplog.text
+    finally:
+        await _stop(agent, task)
+
+
+async def test_server_disconnect_of_valid_device_just_reconnects(
+    api: FakeApi,
+    stub_scanners,  # noqa: F811
+    fast_reconnect,
+    tmp_path,
+    caplog,
+):
+    """Server restart / short hang-up: status says verified -> no re-pair,
+    the agent reconnects on its own (the library would not)."""
+    config = _config(api, tmp_path)
+    agent, task = await _start_paired(api, config)
+    try:
+        token = api.token
+        old_sid = api.sids[token]
+        status_calls_before = api.status_calls
+        heartbeats_before = len(api.heartbeats)
+        await api.disconnect_socket(token)
+
+        await api.wait_for(lambda: api.sids.get(token) not in (None, old_sid), timeout=5)
+        await api.wait_for(lambda: len(api.heartbeats) > heartbeats_before)
+        assert api.status_calls == status_calls_before + 1
+        assert "still valid on the server" in caplog.text
+        assert "removed in the OpenEOS web app" not in caplog.text
+        assert list(api.devices) == [token]
+        assert json.loads((tmp_path / "data" / "device.json").read_text())["device_token"] == token
+        assert agent._ws_client is not None and agent._ws_client.is_connected
     finally:
         await _stop(agent, task)
 
@@ -245,7 +326,7 @@ class TestSocketRejection:
                 device_token="tok-unknown",
                 device_id="dev-x",
                 system_monitor=SystemMonitor(),
-                on_auth_error=reasons.append,
+                on_auth_error=lambda reason, urgent: reasons.append(reason),
             )
             with pytest.raises(Exception):
                 await client.connect()
@@ -263,10 +344,49 @@ class TestSocketRejection:
             device_token="tok-unknown",
             device_id="dev-x",
             system_monitor=SystemMonitor(),
-            on_auth_error=reasons.append,
+            on_auth_error=lambda reason, urgent: reasons.append(reason),
         )
         await client.connect()
         await api.wait_for(lambda: reasons)
         assert reasons[0] == "server error: Authentication required"
         await client.disconnect()
         assert client.is_connected is False
+
+    async def test_server_disconnect_checks_status_and_reconnects(self, api: FakeApi, fast_reconnect, tmp_path):
+        """Reason "server disconnect": one urgent auth-error callback, then
+        the client's own reconnect loop brings the socket back; our own
+        disconnect() stops the loop for good."""
+        calls: list[tuple[str, bool]] = []
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{api.url}/devices/init", json={"deviceType": "printer_agent"}):
+                pass
+        api.verify()
+        token = api.token
+        client = WebSocketClient(
+            config=_config(api, tmp_path),
+            device_token=token,
+            device_id="dev-x",
+            system_monitor=SystemMonitor(),
+            on_auth_error=lambda reason, urgent: calls.append((reason, urgent)),
+        )
+        await client.connect()
+        await api.wait_for(lambda: token in api.sids)
+        first_sid = api.sids[token]
+
+        await api.disconnect_socket(token)
+        await api.wait_for(lambda: calls)
+        assert calls == [("server closed the connection", True)]
+        await api.wait_for(lambda: api.sids.get(token) not in (None, first_sid))
+        await api.wait_for(lambda: client.is_connected)
+
+        # A second hang-up right after a confirmed session is urgent again
+        await api.disconnect_socket(token)
+        await api.wait_for(lambda: len(calls) == 2)
+        assert calls[1] == ("server closed the connection", True)
+        await api.wait_for(lambda: client.is_connected)
+
+        await client.disconnect()
+        sids_after = dict(api.sids)
+        await asyncio.sleep(0.4)  # several SERVER_DISCONNECT_RETRY_S
+        assert client.is_connected is False
+        assert api.sids == sids_after and len(calls) == 2
