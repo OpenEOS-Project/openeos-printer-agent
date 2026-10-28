@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 # A rejected token triggers one GET /devices/status; while the socket
 # library keeps retrying a dead connection every few seconds we do not want
-# a status call per attempt once the answer was "still valid".
+# a status call per attempt once the answer was "still valid". A server
+# that hangs up on an authenticated session ("Agent entfernen") is checked
+# right away regardless (``urgent``).
 AUTH_CHECK_MIN_INTERVAL_S = 30.0
 
 
@@ -213,17 +215,19 @@ class PrinterAgent:
 
     # -- token rejected at runtime --------------------------------------------
 
-    def _on_auth_rejected(self, reason: str) -> None:
-        """Socket refused / REST 401 / status change: find out why, once.
+    def _on_auth_rejected(self, reason: str, urgent: bool = False) -> None:
+        """Socket refused / hung up / REST 401 / status change: find out
+        why, once.
 
         Called synchronously from inside socket events and REST calls, so
         the work is handed to a task. Only one recovery runs at a time and
         a "still valid" verdict is not repeated more often than every
-        ``AUTH_CHECK_MIN_INTERVAL_S``.
+        ``AUTH_CHECK_MIN_INTERVAL_S`` - except for an ``urgent`` call (the
+        server closed an authenticated socket), which is checked at once.
         """
         if self._recovery_task is not None and not self._recovery_task.done():
             return
-        if time.monotonic() - self._last_auth_check < AUTH_CHECK_MIN_INTERVAL_S:
+        if not urgent and time.monotonic() - self._last_auth_check < AUTH_CHECK_MIN_INTERVAL_S:
             return
         self._last_auth_check = time.monotonic()
         self._recovery_task = asyncio.create_task(self._recover_from_auth_error(reason), name="auth-recovery")
@@ -232,7 +236,7 @@ class PrinterAgent:
         registrar = self._device_registrar
         if registrar is None or self._ws_client is None or self._api_client is None:
             return
-        logger.warning(f"Server rejected the device token ({reason}) - checking the device status")
+        logger.warning(f"Server rejected the token or closed the connection ({reason}) - checking the device status")
         try:
             result = await registrar.check_status()
             if result == STATUS_VERIFIED:

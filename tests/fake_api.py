@@ -30,6 +30,7 @@ class FakeApi:
         self.printers: list[dict[str, Any]] = []  # adopted printers
         self.templates: dict[str, str] = {}
         self.sync_calls = 0
+        self.status_calls = 0  # GET /devices/status
         self.heartbeats: list[dict[str, Any]] = []
         self.printer_heartbeats: list[dict[str, Any]] = []
         self.job_completes: list[dict[str, Any]] = []
@@ -87,11 +88,20 @@ class FakeApi:
 
     def remove(self) -> str:
         """Admin removes the agent in the web app: the row is deleted, the
-        token is unknown from now on. Like the real backend the socket is
-        left alone - the agent notices on its next REST call or reconnect."""
+        token is unknown from now on. The real backend also closes the
+        agent's socket - see ``disconnect_socket``; tests combine the two
+        or leave the socket alone to exercise the REST 401 path."""
         token = self.token
         del self.devices[token]
         return token
+
+    async def disconnect_socket(self, token: str) -> None:
+        """Server-initiated disconnect of the agent's socket (DELETE
+        /printer-agents/:id does this, so does a server restart). The
+        client sees reason "server disconnect"."""
+        sid = self.sids.pop(token, None)
+        if sid:
+            await self._sio.disconnect(sid)
 
     async def block(self) -> None:
         """``blockDevice``: status blocked, inactive, status event to the socket."""
@@ -198,6 +208,7 @@ class FakeApi:
     async def _status(self, request: web.Request) -> web.Response:
         # Like the real getDeviceStatus: a blocked (inactive) device still
         # gets its status; only an unknown token is a 401.
+        self.status_calls += 1
         device = self._device(request)
         if device is None:
             return web.json_response({"message": "unauthorized"}, status=401)
