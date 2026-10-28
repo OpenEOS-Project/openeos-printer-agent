@@ -26,7 +26,7 @@ class TestAgentHeartbeat:
 
         payload = client.build_agent_heartbeat()
 
-        assert payload["version"] == "0.2.2"
+        assert payload["version"] == "0.2.3"
         assert payload["os"] in ("linux", "windows", "darwin")
         assert payload["hostname"] == socket.gethostname()
         assert payload["pythonVersion"] == platform.python_version()

@@ -1,9 +1,15 @@
 """Discovery orchestration: run the scanners, merge their results, attach
-MACs and hand the list to the reporter (``POST /device-api/printers/discovered``).
+MACs, classify the candidates and hand the list to the reporter
+(``POST /device-api/printers/discovered``).
 
 Runs once at start, then every ``discovery.interval_s`` (5 minutes), and on
 the ``printerDiscover`` socket event. The subnet port scan is part of a run
 only when explicitly requested (``subnetScan: true``) or enabled in config.
+
+Network candidates are asked for their model with ESC/POS ``GS I`` exactly
+once per scan; the verdict is cached per fingerprint for the agent's
+lifetime so the 5-minute runs stay quiet. An explicit "search again" from
+the web app (``printerDiscover``) clears the cache and asks everything anew.
 """
 
 import asyncio
@@ -13,11 +19,13 @@ from typing import Any, Awaitable, Callable, Optional
 
 from ..config import DiscoveryConfig
 from . import mdns, neighbours, portscan, spooler, usb
+from .classify import Classification, classify_network_probe, classify_network_without_probe
 from .types import DiscoveredPrinter, network_fingerprint
 
 logger = logging.getLogger(__name__)
 
 Reporter = Callable[[list[dict[str, Any]], bool], Awaitable[Any]]
+Prober = Callable[[DiscoveredPrinter, float], Awaitable[portscan.ProbeResult]]
 
 
 class DiscoveryService:
@@ -31,6 +39,7 @@ class DiscoveryService:
         mdns_scanner: Optional[Callable[[float], Awaitable[list[DiscoveredPrinter]]]] = None,
         subnet_scanner: Optional[Callable[..., Awaitable[list[DiscoveredPrinter]]]] = None,
         mac_lookup: Optional[Callable[[], dict[str, str]]] = None,
+        prober: Optional[Prober] = None,
     ) -> None:
         self._config = config
         self._reporter = reporter
@@ -41,11 +50,15 @@ class DiscoveryService:
         self._mdns_scanner = mdns_scanner
         self._subnet_scanner = subnet_scanner
         self._mac_lookup = mac_lookup
+        self._prober = prober
 
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task[None]] = None
         self._wakeup = asyncio.Event()
         self._requested_subnet_scan = False
+        self._requested_reprobe = False
+        # fingerprint -> verdict of the network probe (see module docstring)
+        self._classifications: dict[str, Classification] = {}
         self._last_result: list[DiscoveredPrinter] = []
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
@@ -85,10 +98,16 @@ class DiscoveryService:
 
     # -- scanning ------------------------------------------------------------
 
-    async def scan(self, subnet_scan: bool = False) -> list[DiscoveredPrinter]:
-        """Run all scanners once and return the merged list (no reporting)."""
+    async def scan(self, subnet_scan: bool = False, reprobe: bool = False) -> list[DiscoveredPrinter]:
+        """Run all scanners once and return the merged list (no reporting).
+
+        ``reprobe`` drops the cached network verdicts first, so every
+        candidate is asked again.
+        """
         loop = asyncio.get_running_loop()
         async with self._lock:
+            if reprobe:
+                self._classifications.clear()
             started = time.time()
             results: list[DiscoveredPrinter] = []
 
@@ -127,14 +146,41 @@ class DiscoveryService:
                 macs = {}
 
             merged = merge_results(results, macs)
+            await self._classify_network(merged)
             self._last_result = merged
             self._last_scan_at = time.time()
             logger.info(f"Discovery finished in {time.time() - started:.1f}s: {len(merged)} printer(s)")
             return merged
 
-    async def scan_and_report(self, subnet_scan: bool = False) -> list[DiscoveredPrinter]:
+    async def _classify_network(self, printers: list[DiscoveredPrinter]) -> None:
+        """Attach ``escpos``/``kind``/``kindReason`` to every network
+        candidate: cached verdict, string-based verdict, or one ESC/POS
+        model query per device (bounded parallelism)."""
+        semaphore = asyncio.Semaphore(max(1, self._config.probe_concurrency))
+        prober = self._prober or portscan.probe_printer
+
+        async def classify(printer: DiscoveredPrinter) -> None:
+            cached = self._classifications.get(printer.fingerprint)
+            if cached is None:
+                cached = classify_network_without_probe(printer)
+            if cached is None:
+                async with semaphore:
+                    try:
+                        result = await prober(printer, self._config.probe_timeout_s)
+                    except Exception as e:
+                        logger.debug(f"ESC/POS probe of {printer.details.get('ipAddress')} failed: {e}")
+                        result = portscan.ProbeResult(connected=False)
+                cached = classify_network_probe(printer, result.connected, result.maker, result.model, result.firmware)
+                ip = printer.details.get("ipAddress")
+                logger.info(f"Probed {ip}: escpos={cached.escpos} kind={cached.kind} ({cached.reason})")
+            self._classifications[printer.fingerprint] = cached
+            cached.apply(printer)
+
+        await asyncio.gather(*(classify(p) for p in printers if p.connection_type == "network"))
+
+    async def scan_and_report(self, subnet_scan: bool = False, reprobe: bool = False) -> list[DiscoveredPrinter]:
         """Full scan followed by a ``full: true`` report to the backend."""
-        printers = await self.scan(subnet_scan=subnet_scan)
+        printers = await self.scan(subnet_scan=subnet_scan, reprobe=reprobe)
         if self._reporter is not None:
             try:
                 await self._reporter([p.to_payload() for p in printers], True)
@@ -160,18 +206,25 @@ class DiscoveryService:
                 pass
             self._task = None
 
-    def trigger(self, subnet_scan: bool = False) -> None:
-        """Request an immediate scan (``printerDiscover`` socket event)."""
+    def trigger(self, subnet_scan: bool = False, reprobe: bool = True) -> None:
+        """Request an immediate scan (``printerDiscover`` socket event).
+
+        An explicit request from the web app re-asks every network device
+        (``reprobe``); the scheduled runs reuse the cached verdicts.
+        """
         self._requested_subnet_scan = self._requested_subnet_scan or subnet_scan
+        self._requested_reprobe = self._requested_reprobe or reprobe
         self._wakeup.set()
 
     async def _loop(self) -> None:
         while True:
             subnet = self._requested_subnet_scan or self._config.subnet_scan_on_schedule
+            reprobe = self._requested_reprobe
             self._requested_subnet_scan = False
+            self._requested_reprobe = False
             self._wakeup.clear()
             try:
-                await self.scan_and_report(subnet_scan=subnet)
+                await self.scan_and_report(subnet_scan=subnet, reprobe=reprobe)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

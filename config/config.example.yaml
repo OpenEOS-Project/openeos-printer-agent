@@ -34,6 +34,7 @@ discovery:
   interval_s: 300          # automatic scan every 5 minutes
   # subnet: "192.168.1.0/24"        # /24 for the port-9100 scan (default: own interface)
   # subnet_scan_on_schedule: false  # port scan also on the automatic runs
+  # probe_timeout_s: 1.0            # ESC/POS model query (GS I) per network device
 
 # Cash-drawer kick pin (2 for most Epson drawers, some use 5).
 cash_drawer_pin: 2

@@ -1,15 +1,18 @@
-"""Port-9100 sweep of the local /24 (on request only).
+"""Port-9100 sweep of the local /24 (on request only) and the ESC/POS
+model query used to tell receipt printers from everything else.
 
-A TCP connect per host with a short timeout and bounded parallelism; every
-open port is then asked for maker and model with ESC/POS ``GS I`` so the web
-app can show something better than an IP. Printers that do not answer the
-query (or answer garbage) are still reported - the connect alone is a hit.
+The sweep is a TCP connect per host with a short timeout and bounded
+parallelism; hosts with the port open are reported with their IP only.
+``probe_printer`` then asks a network candidate (from the sweep or from
+mDNS) for its model with ``GS I`` - the discovery service runs it once per
+device and scan, see ``service.py``.
 """
 
 import asyncio
 import ipaddress
 import logging
 import socket
+from dataclasses import dataclass
 from typing import Optional
 
 from .types import DiscoveredPrinter, network_fingerprint
@@ -18,10 +21,27 @@ logger = logging.getLogger(__name__)
 
 RAW_PORT = 9100
 MAX_HOSTS = 256
+PROBE_TIMEOUT_S = 1.0
 
-# GS I n: n=66 (B) maker name, n=67 (C) model name. Replies are "_" + text + NUL.
+# GS I n: n=65 (A) firmware version, n=66 (B) maker name, n=67 (C) model
+# name. Replies are "_" + text + NUL.
+GS_I_FIRMWARE = b"\x1d\x49\x41"
 GS_I_MAKER = b"\x1d\x49\x42"
 GS_I_MODEL = b"\x1d\x49\x43"
+
+
+@dataclass
+class ProbeResult:
+    """Outcome of one ESC/POS model query."""
+
+    connected: bool
+    maker: Optional[str] = None
+    model: Optional[str] = None
+    firmware: Optional[str] = None
+
+    @property
+    def answered(self) -> bool:
+        return bool(self.maker or self.model or self.firmware)
 
 
 def local_ipv4() -> Optional[str]:
@@ -95,27 +115,36 @@ def parse_gs_i_reply(data: bytes) -> Optional[str]:
     return cleaned or None
 
 
-async def query_model(ip: str, port: int, timeout: float = 0.5) -> tuple[Optional[str], Optional[str]]:
-    """Best-effort ESC/POS maker/model query. Any failure yields (None, None)."""
+async def query_model(ip: str, port: int, timeout: float = PROBE_TIMEOUT_S) -> ProbeResult:
+    """Best-effort ESC/POS model query. Any failure yields a silent result.
+
+    Asks for the model first (``GS I 67``); a printer that answers is also
+    asked for its maker. One that stays silent gets a last chance with the
+    firmware query (``GS I 65``), which some clones implement instead.
+    Nothing is ever retried, so a non-ESC/POS device sees at most two short
+    writes.
+    """
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
     except Exception:
-        return None, None
-    maker: Optional[str] = None
-    model: Optional[str] = None
+        return ProbeResult(connected=False)
+    result = ProbeResult(connected=True)
+
+    async def ask(query: bytes) -> Optional[str]:
+        writer.write(query)
+        await writer.drain()
+        try:
+            reply = await asyncio.wait_for(reader.readuntil(b"\x00"), timeout)
+        except Exception:
+            return None
+        return parse_gs_i_reply(reply)
+
     try:
-        for query, setter in ((GS_I_MAKER, "maker"), (GS_I_MODEL, "model")):
-            writer.write(query)
-            await writer.drain()
-            try:
-                reply = await asyncio.wait_for(reader.readuntil(b"\x00"), timeout)
-            except Exception:
-                break
-            text = parse_gs_i_reply(reply)
-            if setter == "maker":
-                maker = text
-            else:
-                model = text
+        result.model = await ask(GS_I_MODEL)
+        if result.model:
+            result.maker = await ask(GS_I_MAKER)
+        else:
+            result.firmware = await ask(GS_I_FIRMWARE)
     except Exception:
         pass
     finally:
@@ -124,7 +153,26 @@ async def query_model(ip: str, port: int, timeout: float = 0.5) -> tuple[Optiona
             await writer.wait_closed()
         except Exception:
             pass
-    return maker, model
+    return result
+
+
+async def probe_printer(printer: DiscoveredPrinter, timeout: float = PROBE_TIMEOUT_S) -> ProbeResult:
+    """Run the model query against a network candidate and fold the answer
+    into its details (maker/model/display name). The classification itself
+    is the service's job."""
+    ip = str(printer.details.get("ipAddress") or "")
+    port = printer.details.get("port")
+    if not ip:
+        return ProbeResult(connected=False)
+    result = await query_model(ip, int(port) if isinstance(port, int) else RAW_PORT, timeout)
+    if result.answered:
+        if result.maker and not printer.details.get("manufacturer"):
+            printer.details["manufacturer"] = result.maker
+        if result.model and not printer.details.get("model"):
+            printer.details["model"] = result.model
+        if printer.display_name in ("", ip):
+            printer.display_name = " ".join(p for p in (result.maker, result.model) if p) or ip
+    return result
 
 
 async def probe_host(ip: str, port: int, timeout: float) -> bool:
@@ -163,18 +211,15 @@ async def scan_subnet(
     results = await asyncio.gather(*(probe(ip) for ip in hosts), return_exceptions=True)
     hits = [r for r in results if isinstance(r, str)]
 
-    found: list[DiscoveredPrinter] = []
-    for ip in hits:
-        maker, model = await query_model(ip, port)
-        display = " ".join(p for p in (maker, model) if p) or ip
-        found.append(
-            DiscoveredPrinter(
-                fingerprint=network_fingerprint(None, ip),
-                connection_type="network",
-                display_name=display,
-                discovered_via="portscan",
-                details={"ipAddress": ip, "port": port, "manufacturer": maker, "model": model},
-            )
+    found = [
+        DiscoveredPrinter(
+            fingerprint=network_fingerprint(None, ip),
+            connection_type="network",
+            display_name=ip,
+            discovered_via="portscan",
+            details={"ipAddress": ip, "port": port},
         )
+        for ip in hits
+    ]
     logger.info(f"Port scan {subnet}: {len(found)} host(s) with port {port} open")
     return found

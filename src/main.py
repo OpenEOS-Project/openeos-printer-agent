@@ -387,9 +387,10 @@ class PrinterAgent:
             logger.error(f"Failed to open cash drawer on printer {printer_id}: {e}")
 
     async def _handle_discover(self, subnet_scan: bool) -> None:
-        """``printerDiscover`` from the server: queue an immediate scan."""
+        """``printerDiscover`` from the server: queue an immediate scan that
+        re-asks every network device (the user pressed "search again")."""
         if self._discovery:
-            self._discovery.trigger(subnet_scan=subnet_scan)
+            self._discovery.trigger(subnet_scan=subnet_scan, reprobe=True)
 
     async def _handle_config_update(self, data: dict[str, Any]) -> None:
         """Callback when printerConfigUpdate is received via WebSocket.
