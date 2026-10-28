@@ -509,11 +509,12 @@ class TestClassifier:
         assert classify.classify_network_without_probe(p) is None
         # a Brother QL is a label printer, but only the probe can tell
         # whether it speaks ESC/POS - it is asked too
-        ql = DiscoveredPrinter("net:1.2.3.4", "network", "Brother QL-820NWB", "mdns", {"model": "Brother QL-820NWB"})
+        details = {"manufacturer": "Brother", "model": "Brother QL-820NWB"}
+        ql = DiscoveredPrinter("net:1.2.3.4", "network", "Brother QL-820NWB", "mdns", details)
         assert classify.classify_network_without_probe(ql) is None
         c = classify.classify_network_probe(ql, True, None, None, None)
         assert (c.escpos, c.kind) == ("no", "label")
-        assert "QL-820NWB" in c.reason and "keine Antwort" in c.reason
+        assert c.reason == "Modell Brother QL-820NWB, keine Antwort auf ESC/POS-Modellabfrage"
         bare = DiscoveredPrinter("net:1.2.3.4", "network", "1.2.3.4", "portscan", {"ipAddress": "1.2.3.4"})
         assert classify.classify_network_without_probe(bare) is None
 

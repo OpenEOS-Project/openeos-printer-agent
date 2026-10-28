@@ -118,6 +118,16 @@ def _join(*parts: Optional[str]) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _device_name(manufacturer: Optional[str], model: Optional[str]) -> str:
+    """``Brother QL-820NWB`` - not ``Brother Brother QL-820NWB`` when the
+    model string (mDNS ``ty``) already starts with the maker."""
+    manufacturer = (manufacturer or "").strip()
+    model = (model or "").strip()
+    if manufacturer and model.lower().startswith(manufacturer.lower()):
+        return model
+    return _join(manufacturer, model)
+
+
 def match_office(*texts: Optional[str], hostname: Optional[str] = None) -> Optional[str]:
     """Office vendor label when any text (or the hostname) points at one."""
     label = _first_match(_join(*texts), OFFICE_PATTERNS)
@@ -186,7 +196,7 @@ def classify_network_without_probe(printer: DiscoveredPrinter) -> Optional[Class
     model = str(d.get("model") or "")
     manufacturer = str(d.get("manufacturer") or "")
     hostname = str(d.get("hostname") or "")
-    text = _join(manufacturer, model)
+    text = _device_name(manufacturer, model)
     if match_receipt(text) or match_label(text):
         # Looks like a POS device, but only the probe can tell an ESC/POS
         # label printer (Epson TM-L, Bixolon SLP) from a raster one
@@ -194,7 +204,7 @@ def classify_network_without_probe(printer: DiscoveredPrinter) -> Optional[Class
         return None
     label = match_office(text, hostname=hostname)
     if label:
-        what = f"Modell {model}" if model else f"Hostname {hostname}" if hostname else "Hersteller"
+        what = f"Modell {text}" if text else f"Hostname {hostname}" if hostname else "Hersteller"
         return Classification("unknown", "office", f"{what} ({label}, nicht abgefragt)")
     return None
 
@@ -207,7 +217,7 @@ def classify_network_probe(
         answer = _join(maker, model) or f"Firmware {firmware}"
         return Classification("yes", "receipt", f"antwortet auf ESC/POS-Modellabfrage ({answer})")
     d = printer.details
-    known = _join(str(d.get("manufacturer") or ""), str(d.get("model") or "")).strip()
+    known = _device_name(str(d.get("manufacturer") or ""), str(d.get("model") or ""))
     hostname = str(d.get("hostname") or "")
     why = (
         f"Port {d.get('port') or 9100} nicht erreichbar" if not connected else "keine Antwort auf ESC/POS-Modellabfrage"
