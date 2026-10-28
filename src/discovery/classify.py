@@ -187,11 +187,11 @@ def classify_network_without_probe(printer: DiscoveredPrinter) -> Optional[Class
     manufacturer = str(d.get("manufacturer") or "")
     hostname = str(d.get("hostname") or "")
     text = _join(manufacturer, model)
-    if match_receipt(text):
-        return None  # looks right, but let the probe confirm it
-    label = match_label(text)
-    if label:
-        return Classification("unknown", "label", f"Modell {label}")
+    if match_receipt(text) or match_label(text):
+        # Looks like a POS device, but only the probe can tell an ESC/POS
+        # label printer (Epson TM-L, Bixolon SLP) from a raster one
+        # (Brother QL, Zebra ZPL) that the agent cannot drive.
+        return None
     label = match_office(text, hostname=hostname)
     if label:
         what = f"Modell {model}" if model else f"Hostname {hostname}" if hostname else "Hersteller"
@@ -207,15 +207,16 @@ def classify_network_probe(
         answer = _join(maker, model) or f"Firmware {firmware}"
         return Classification("yes", "receipt", f"antwortet auf ESC/POS-Modellabfrage ({answer})")
     d = printer.details
-    known = _join(str(d.get("manufacturer") or ""), str(d.get("model") or ""))
-    if not connected:
-        port = d.get("port") or 9100
-        if match_receipt(known):
-            return Classification("no", "receipt", f"Modell {known.strip()}, Port {port} nicht erreichbar")
-        return Classification("no", "unknown", f"Port {port} nicht erreichbar")
+    known = _join(str(d.get("manufacturer") or ""), str(d.get("model") or "")).strip()
+    hostname = str(d.get("hostname") or "")
+    why = (
+        f"Port {d.get('port') or 9100} nicht erreichbar" if not connected else "keine Antwort auf ESC/POS-Modellabfrage"
+    )
     if match_receipt(known):
-        return Classification("no", "receipt", f"Modell {known.strip()}, keine Antwort auf ESC/POS-Modellabfrage")
-    label = match_office(known, hostname=str(d.get("hostname") or ""))
+        return Classification("no", "receipt", f"Modell {known}, {why}")
+    if match_label(known):
+        return Classification("no", "label", f"Modell {known}, {why}")
+    label = match_office(known, hostname=hostname)
     if label:
-        return Classification("no", "office", f"keine Antwort auf ESC/POS-Modellabfrage ({label})")
-    return Classification("no", "unknown", "keine Antwort auf ESC/POS-Modellabfrage")
+        return Classification("no", "office", f"{why} ({label})")
+    return Classification("no", "unknown", why)

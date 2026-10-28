@@ -507,6 +507,13 @@ class TestClassifier:
     def test_network_receipt_model_is_probed_anyway(self):
         p = DiscoveredPrinter("net:1.2.3.4", "network", "EPSON TM-T88VI", "mdns", {"model": "EPSON TM-T88VI"})
         assert classify.classify_network_without_probe(p) is None
+        # a Brother QL is a label printer, but only the probe can tell
+        # whether it speaks ESC/POS - it is asked too
+        ql = DiscoveredPrinter("net:1.2.3.4", "network", "Brother QL-820NWB", "mdns", {"model": "Brother QL-820NWB"})
+        assert classify.classify_network_without_probe(ql) is None
+        c = classify.classify_network_probe(ql, True, None, None, None)
+        assert (c.escpos, c.kind) == ("no", "label")
+        assert "QL-820NWB" in c.reason and "keine Antwort" in c.reason
         bare = DiscoveredPrinter("net:1.2.3.4", "network", "1.2.3.4", "portscan", {"ipAddress": "1.2.3.4"})
         assert classify.classify_network_without_probe(bare) is None
 
