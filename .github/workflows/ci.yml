@@ -152,7 +152,7 @@ jobs:
           cyclonedx-py environment --pyproject pyproject.toml --of JSON -o sbom.cdx.json /tmp/agent-env/bin/python
 
       - name: SBOM hochladen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openeos-printer-agent-sbom.cdx.json
           path: sbom.cdx.json
