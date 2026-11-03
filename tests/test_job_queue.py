@@ -163,3 +163,22 @@ class TestJobQueue:
             assert args[1] == "WORKER_ERROR"
         finally:
             await job_queue.stop_workers()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [None, 48])
+async def test_job_renders_with_paper_width_and_columns(sample_print_job, columns):
+    pm = PrinterManager(dummy=True)
+    config = {"id": "printer-001", "name": "Bon", "connectionType": "usb", "paperWidth": 80, "columns": columns}
+    await pm.initialize([config])
+    engine = MagicMock(wraps=TemplateEngine())
+    jq = JobQueue(printer_manager=pm, template_engine=engine, on_job_complete=AsyncMock())
+    jq.start_workers()
+    try:
+        await jq.enqueue(sample_print_job)
+        await asyncio.wait_for(jq._queues["printer-001"].join(), timeout=2)
+    finally:
+        await jq.stop_workers()
+    data = engine.render.call_args.args[1]
+    assert data["paper_width"] == 80
+    assert data["columns"] == columns

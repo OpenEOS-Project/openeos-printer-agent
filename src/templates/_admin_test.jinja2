@@ -1,18 +1,17 @@
-==========================================
-            OPENEOS TEST-DRUCK
-==========================================
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
+{{ "=" * cols }}
+<<CENTER>>OPENEOS TEST-DRUCK<</CENTER>>
+{{ "=" * cols }}
 
-Drucker:    {{ printerName | default("(unbekannt)") }}
-Auftrag:    {{ jobId | default("(ohne)") }}
-Zeit:       {{ timestamp | default("") }}
+{{ ("Drucker:    " ~ printerName|default("(unbekannt)"))|wordwrap(cols, true, "\n") }}
+{{ ("Auftrag:    " ~ jobId|default("(ohne)"))|wordwrap(cols, true, "\n") }}
+{{ ("Zeit:       " ~ timestamp|default(""))|wordwrap(cols, true, "\n") }}
 
-{{ body | default("Dies ist ein Test-Druck aus dem
-Super-Admin-Interface.") }}
+{{ body|default("Dies ist ein Test-Druck aus dem Super-Admin-Interface.")|wordwrap(cols, true, "\n") }}
 
-------------------------------------------
-Wenn du das hier siehst, kommuniziert
-der Agent korrekt mit dem Backend.
-==========================================
+{{ "-" * cols }}
+{{ "Wenn du das hier siehst, kommuniziert der Agent korrekt mit dem Backend."|wordwrap(cols, true, "\n") }}
+{{ "=" * cols }}
 
 
 

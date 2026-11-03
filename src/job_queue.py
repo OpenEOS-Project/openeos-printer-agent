@@ -203,7 +203,7 @@ class JobQueue:
                 # Render template
                 rendered = self._template_engine.render(
                     job.template_name,
-                    {**job.payload, "paper_width": printer.paper_width},
+                    {**job.payload, "paper_width": printer.paper_width, "columns": printer.columns},
                 )
 
                 # Send to printer. A named function instead of a lambda here,

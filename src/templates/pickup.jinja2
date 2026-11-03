@@ -1,4 +1,6 @@
-{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{# Zeichen pro Zeile: `columns` des Druckers, sonst 42 (80 mm) bzw. 32 (58 mm).
+   Keine Zeile darf breiter sein, BIG zaehlt doppelt. #}
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {% set sep = "=" * cols %}
 {% set line = "-" * cols %}
 <<CENTER>><<BIG>>ABHOLUNG<</BIG>><</CENTER>>
@@ -6,11 +8,11 @@
 <<CENTER>><<BIG>>#{{ daily_number|default(order_number|default("---")) }}<</BIG>><</CENTER>>
 {{ line }}
 {% if customer_name is defined and customer_name %}
-<<BOLD>>Kunde: {{ customer_name }}<</BOLD>>
+<<BOLD>>{{ ("Kunde: " ~ customer_name)|wordwrap(cols, true, "\n") }}<</BOLD>>
 {% endif %}
 {{ line }}
 {% for item in items|default([]) %}
-{{ item.quantity }}x {{ item.name }}
+{{ (item.quantity ~ "x " ~ item.name)|wordwrap(cols, true, "\n") }}
 {% endfor %}
 {{ sep }}
 <<CENTER>>{{ created_at|strftime("%d.%m.%Y %H:%M") }}<</CENTER>>

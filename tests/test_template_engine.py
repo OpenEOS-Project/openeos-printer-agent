@@ -404,3 +404,154 @@ class TestTseReceipt:
         assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
         assert "TSE-Transaktion: 85" in result
         assert f"<<QRCODE:{qr}>>" in result
+
+
+# Zeilenbreite: Jede Vorlage muss bei 32 (58 mm), 42 (80 mm) und 48 Zeichen
+# (80 mm mit 576 Punkten) in die Zeile passen, sonst bricht der Drucker das
+# letzte Zeichen in die naechste Zeile um. Die Daten sind absichtlich lang.
+LONG_NAME = "Currywurst mit Pommes und extra scharfer Sauce"
+LONG_TEXT = "bitte ohne Zwiebeln und Senf, dafuer mit doppelt Ketchup und Mayo"
+
+LONG_COMMON = {
+    "is_test": True,
+    "organization": {
+        "name": "Freiwillige Feuerwehr Musterstadt-Oberdorf e.V.",
+        "address": "Hauptstrasse 123, 12345 Musterstadt-Oberdorf am Rhein",
+        "phone": "+49 (0) 1234 567890-123",
+    },
+    "event_name": "Sommerfest der Freiwilligen Feuerwehr Musterstadt 2026",
+    "order_number": "20261103-0042",
+    "daily_number": 42,
+    "order_id": "6f1c2d3e-4b5a-4c6d-8e7f-0123456789ab",
+    "order_item_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "created_at": "2026-11-03T16:02:33Z",
+    "original_created_at": "2026-11-03T15:30:00Z",
+    "table_number": "Terrasse hinten links 12",
+    "customer_name": "Maximiliane Mustermann-Schmidtbauer",
+    "station_name": "Grill und Fritteuse im Aussenbereich",
+    "priority": "high",
+    "items": [
+        {"quantity": 2, "name": "Bratwurst", "total": 7.0, "notes": LONG_TEXT, "kitchen_notes": LONG_TEXT},
+        {"quantity": 12, "name": LONG_NAME, "total": 1234.5, "options": ["Grosse Portion mit extra Kaese", LONG_TEXT]},
+        {"quantity": 100, "name": "Pfand", "total": 200.0},
+    ],
+    "subtotal": 1441.5,
+    "tax_lines": [{"rate": 19, "tax": 230.16}, {"rate": 7.5, "tax": 1.23}],
+    "total": 12345.67,
+    "payment_method": "sumup_terminal",
+    "payment_label": "Karte (SumUp Solo Terminal am Eingang)",
+    "paid_amount": 12345.67,
+    "change": 1.5,
+    "qr_url": "https://app.openeos.de/r/0a1b2c3d",
+    "refund_number": "20261103-0042-E1",
+    "pfand_amount": -200.0,
+    "tip_amount": -2.5,
+    "reprint": True,
+    "refund_status": "manual",
+    "provider_reference": "sumup-txn-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "reason": "Qualitaet: " + LONG_TEXT,
+    "actor_name": "Maximiliane Mustermann-Schmidtbauer",
+    "device_name": "Kasse 3 am Haupteingang neben der Buehne",
+    "printerName": "EPSON TM-T20III Theke links (Netzwerk)",
+    "jobId": "job-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "timestamp": "2026-11-03T16:02:33.000Z",
+}
+
+WIDTH_CASES = [
+    ("receipt", {"tse": tse_block(bon_number=123456)}),
+    ("receipt", {"tse": tse_block(failed=True, signature=None, qr_code=None, bon_number=7)}),
+    ("receipt", {"tse": tse_block(training=True, bon_number=8), "tax_lines": None, "tax_amount": 1.5}),
+    ("refund_receipt", {"refund_kind": "cancellation", "tse": tse_block(bon_number=9)}),
+    ("order_ticket", {}),
+    ("order_ticket", {"hide_prices": True}),
+    ("kitchen_ticket", {"fulfillment_type": "table_service"}),
+    ("kitchen_ticket", {"source": "online"}),
+    ("kitchen_ticket", {"order_item_id": None}),
+    ("cancellation_ticket", {}),
+    ("pickup", {}),
+    ("_admin_test", {}),
+]
+
+MARKUP = re.compile(r"<<(/?\w+)(?::[^>]*)?>>")
+
+
+def printed_widths(text: str) -> list[tuple[int, str]]:
+    """Breite jeder gedruckten Zeile: ohne Markup, Text in BIG doppelt."""
+    widths = []
+    big = False
+    for raw in text.split("\n"):
+        # Der Renderer entfernt fuehrende und folgende Leerzeichen.
+        line = raw.strip()
+        width = 0
+        pos = 0
+        for m in MARKUP.finditer(line):
+            width += len(line[pos : m.start()]) * (2 if big else 1)
+            if m.group(1) == "BIG":
+                big = True
+            elif m.group(1) == "/BIG":
+                big = False
+            pos = m.end()
+        width += len(line[pos:]) * (2 if big else 1)
+        widths.append((width, raw))
+    return widths
+
+
+def test_width_cases_cover_every_builtin_template():
+    from src.template_engine import BUILTIN_TEMPLATES_DIR
+
+    builtin = {p.stem for p in BUILTIN_TEMPLATES_DIR.glob("*.jinja2")}
+    assert builtin == {name for name, _ in WIDTH_CASES}
+
+
+@pytest.mark.parametrize("cols, paper", [(32, {"paper_width": 58}), (42, {"paper_width": 80}), (48, {"columns": 48})])
+@pytest.mark.parametrize("name, extra", WIDTH_CASES)
+def test_no_line_exceeds_paper_width(name, extra, cols, paper):
+    result = TemplateEngine().render(name, {**LONG_COMMON, **extra, **paper})
+    too_wide = [(w, line) for w, line in printed_widths(result) if w > cols]
+    assert not too_wide, f"{name} @ {cols} Zeichen: {too_wide}"
+    # Trennlinien laufen ueber die volle Breite, nicht ueber die Standardbreite.
+    rules = [line.strip() for line in result.splitlines() if set(line.strip()) in ({"="}, {"#"}, {"-"})]
+    assert rules and all(len(rule) == cols for rule in rules)
+
+
+@pytest.mark.parametrize("cols, paper", [(32, 58), (42, 80)])
+def test_item_and_total_lines_fill_the_row_exactly(sample_print_job, cols, paper):
+    result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "paper_width": paper})
+    item = next(line for line in result.splitlines() if line.startswith("2x"))
+    assert item.startswith("2x  Bratwurst ")
+    assert item.endswith(" 7,00 EUR")
+    assert len(item) == cols
+    total = next(line for line in result.splitlines() if "GESAMT:" in line)
+    assert len(MARKUP.sub("", total)) == cols
+
+
+def test_columns_setting_overrides_paper_default(sample_print_job):
+    result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "paper_width": 80, "columns": 48})
+    assert "=" * 48 in result
+    # None (Drucker ohne eigene Einstellung) faellt auf die Papierbreite zurueck.
+    result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "paper_width": 58, "columns": None})
+    assert "=" * 32 in result and "=" * 33 not in result
+
+
+def test_long_item_names_wrap_instead_of_being_cut():
+    payload = {**LONG_COMMON, "paper_width": 58, "items": [{"quantity": 1, "name": LONG_NAME, "total": 9.5}]}
+    for name in ("receipt", "refund_receipt", "order_ticket"):
+        result = TemplateEngine().render(name, payload)
+        words = unwrap_words(result)
+        # Alle Woerter in Reihenfolge, auch das letzte (nichts abgeschnitten).
+        positions = [words.index(word) for word in LONG_NAME.split()]
+        assert positions == sorted(positions), name
+
+
+def unwrap_words(text: str) -> list[str]:
+    return " ".join(MARKUP.sub("", line).strip() for line in text.splitlines()).split()
+
+
+@pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_tse_block_prints_bon_number(name, failed):
+    block = tse_block(failed=failed, bon_number=4711)
+    result = TemplateEngine().render(name, {**LONG_COMMON, "paper_width": 80, "tse": block})
+    assert "Beleg-Nr.: 4711" in result
+    result = TemplateEngine().render(name, {**LONG_COMMON, "paper_width": 80, "tse": tse_block(failed=failed)})
+    assert "Beleg-Nr." not in result

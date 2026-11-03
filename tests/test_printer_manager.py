@@ -116,3 +116,14 @@ class TestManagerReconfigure:
         assert pm.get_printer("p1") is not first
         await pm.reconfigure([])
         assert pm.get_all_printers() == []
+
+    async def test_columns_change_triggers_reconnect(self):
+        pm = PrinterManager(dummy=True)
+        await pm.initialize([{"id": "p1", "name": "A", "connectionType": "usb"}])
+        first = pm.get_printer("p1")
+        assert first is not None and first.columns is None
+        await pm.reconfigure([{"id": "p1", "name": "A", "connectionType": "usb", "columns": None}])
+        assert pm.get_printer("p1") is first
+        await pm.reconfigure([{"id": "p1", "name": "A", "connectionType": "usb", "columns": 48}])
+        second = pm.get_printer("p1")
+        assert second is not first and second is not None and second.columns == 48
