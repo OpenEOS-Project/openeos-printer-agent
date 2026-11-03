@@ -276,11 +276,11 @@ def qr_box_size(data: str, min_dots: int = QR_MIN_DOTS, max_dots: int = QR_MAX_D
     probe = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_Q, border=QR_QUIET_ZONE)
     probe.add_data(data)
     probe.make(fit=True)
-    modules = probe.modules_count + 2 * QR_QUIET_ZONE
+    modules: int = int(probe.modules_count) + 2 * QR_QUIET_ZONE
     box = max(QR_MIN_MODULE_DOTS, -(-min_dots // modules))  # ceil
     while box > 1 and modules * box > max_dots:
         box -= 1
-    return min(box, 16)  # python-escpos accepts 1..16
+    return int(min(box, 16))  # python-escpos accepts 1..16
 
 
 def _print_qrcode(printer: Any, data: str) -> None:
