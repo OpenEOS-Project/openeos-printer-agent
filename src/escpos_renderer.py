@@ -251,23 +251,65 @@ def _print_software_barcode(printer: Any, bc_type: str, value: str) -> None:
         logger.error(f"Software barcode rendering failed for {bc_type}={value!r}: {e}")
 
 
-def _print_qrcode(printer: Any, data: str) -> None:
-    """Generate QR code and print as image."""
-    try:
-        qr = qrcode.QRCode(version=1, box_size=4, border=2)
-        qr.add_data(data)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
+# QR codes: DSFinV-K Anhang I asks for a TSE QR code of at least 3 cm and a
+# "sufficiently high" error correction. At the 203 dpi of receipt printers
+# (8 dots/mm) 3 cm are 240 dots; we aim a bit higher so the printed code
+# keeps its size even when the printer trims a few dots.
+QR_MIN_DOTS = 256
+# 58 mm paper prints 384 dots; staying below keeps the code on every printer.
+QR_MAX_DOTS = 384
+# python-escpos renders the image with a one-module quiet zone.
+QR_QUIET_ZONE = 1
+# Dense codes (the TSE code is ~340 characters, version 17) scan badly with
+# modules of three dots (0.375 mm) on thermal paper — use at least four when
+# the code still fits.
+QR_MIN_MODULE_DOTS = 4
 
-        # Convert to PIL Image for printer.image()
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        pil_img = Image.open(buf)
-        printer.image(pil_img)
+
+def qr_box_size(data: str, min_dots: int = QR_MIN_DOTS, max_dots: int = QR_MAX_DOTS) -> int:
+    """Dots per QR module so the code is at least ``min_dots`` wide.
+
+    Computed for error correction Q (what we print), with at least
+    ``QR_MIN_MODULE_DOTS`` per module. Never exceeds ``max_dots`` unless even
+    one dot per module would (very long data).
+    """
+    probe = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_Q, border=QR_QUIET_ZONE)
+    probe.add_data(data)
+    probe.make(fit=True)
+    modules = probe.modules_count + 2 * QR_QUIET_ZONE
+    box = max(QR_MIN_MODULE_DOTS, -(-min_dots // modules))  # ceil
+    while box > 1 and modules * box > max_dots:
+        box -= 1
+    return min(box, 16)  # python-escpos accepts 1..16
+
+
+def _print_qrcode(printer: Any, data: str) -> None:
+    """Print a QR code with error correction Q, at least 3 cm wide.
+
+    Uses python-escpos' ``qr()`` with software rendering (``native=False``):
+    the printer's own QR command is missing or limited in size on many cheap
+    thermal printers, an image works everywhere. Centering comes from the
+    surrounding ``<<CENTER>>`` (ESC a), as for every other image.
+    """
+    try:
+        from escpos.constants import QR_ECLEVEL_Q
+
+        printer.qr(data, ec=QR_ECLEVEL_Q, size=qr_box_size(data), native=False)
     except Exception as e:
         logger.error(f"Failed to print QR code: {e}")
-        printer.text(f"[QR: {data}]\n")
+        # Old fallback for printers that reject the qr() image path.
+        try:
+            qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_Q, box_size=4, border=2)
+            qr.add_data(data)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            printer.image(Image.open(buf))
+        except Exception as e2:  # noqa: BLE001
+            logger.error(f"QR image fallback failed: {e2}")
+            printer.text(f"[QR: {data}]\n")
 
 
 def _print_image(printer: Any, path: str) -> None:

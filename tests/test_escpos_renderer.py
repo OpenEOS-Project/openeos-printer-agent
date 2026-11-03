@@ -1,9 +1,10 @@
 from unittest.mock import MagicMock, call
 
+import qrcode
 from escpos.printer import Dummy
 from PIL import Image
 
-from src.escpos_renderer import _handle_tag, render_to_printer
+from src.escpos_renderer import _handle_tag, qr_box_size, render_to_printer
 
 
 class TestRenderToPrinter:
@@ -127,6 +128,46 @@ class TestRealPillowRendering:
         # "[QR: ...]" fallback text printed on error.
         assert len(printer.output) > 100
         assert b"[QR:" not in printer.output
+
+    def test_tse_qrcode_is_error_correction_q_and_at_least_3cm(self):
+        # DSFinV-K Anhang I: QR-Code >= 3 cm, ausreichend hohe Fehlerkorrektur.
+        # V0-Inhalt in realer Laenge (Signatur und Public Key je 88 Zeichen).
+        data = (
+            "V0;OEOS-2BDA366D6B8D;Kassenbeleg-V1;Beleg^9.00_3.50_0.00_0.00_0.00^12.50:Bar;84;183;"
+            "2026-11-03T16:02:33.000Z;2026-11-03T16:02:34.000Z;ecdsa-plain-SHA256;unixTime;"
+            + "A+/=" * 22
+            + ";"
+            + "B+/=" * 22
+        )
+        printer = Dummy()
+        images = []
+        original = printer.image
+
+        def capture(img, *args, **kwargs):
+            images.append(img)
+            return original(img, *args, **kwargs)
+
+        printer.image = capture
+        render_to_printer(printer, f"<<CENTER>><<QRCODE:{data}>><</CENTER>>")
+        assert b"[QR:" not in printer.output
+        assert len(images) == 1
+        width = images[0].size[0]
+        # 203 dpi = 8 Punkte/mm: mindestens 30 mm, hoechstens 58-mm-Papier.
+        assert 240 <= width <= 384
+        # Fehlerkorrektur Q: dieselbe Groesse wie ein mit Q erzeugter Code.
+        probe = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_Q, border=1)
+        probe.add_data(data)
+        probe.make(fit=True)
+        assert width % (probe.modules_count + 2) == 0
+
+    def test_qr_box_size_bounds(self):
+        assert qr_box_size("https://openeos.de/order/1") * 31 >= 256
+        long = "X" * 400
+        box = qr_box_size(long)
+        probe = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_Q, border=1)
+        probe.add_data(long)
+        probe.make(fit=True)
+        assert (probe.modules_count + 2) * box <= 384
 
     def test_barcode_renders_without_error(self):
         printer = Dummy()

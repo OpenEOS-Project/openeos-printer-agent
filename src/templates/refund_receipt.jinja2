@@ -63,6 +63,44 @@ Bediener: {{ actor_name }}
 {% if device_name is defined and device_name %}
 Kasse: {{ device_name }}
 {% endif %}
+{# TSE-Angaben nach AEAO zu § 146a Nr. 2.2 und DSFinV-K Anhang I (Vertrag:
+   tse-swissbit-plan.md §8.6): Kassen-ID (Client-ID), TSE-Seriennummer und
+   Signatur ungekuerzt (umbrochen), Transaktionsnummer, Signaturzaehler,
+   Start/Ende in UTC wie von der TSE geliefert, QR-Code (V0). Ohne Signatur
+   nur der Ausfallvermerk, bei Trainingsbuchungen der Trainingsvermerk.
+   Eigenstaendig (braucht weder `cols` noch `line`), damit die API den
+   Block auch an eigene Vorlagen haengen kann. #}
+{% if tse is defined and tse %}
+{% set tse_cols = cols if cols is defined else (42 if paper_width|default(80) == 80 else 32) %}
+{{ "-" * tse_cols }}
+{% if tse.failed %}
+<<CENTER>><<BOLD>>TSE ausgefallen<</BOLD>><</CENTER>>
+<<CENTER>>Beleg ohne Signatur<</CENTER>>
+Kassen-ID: {{ tse.client_id }}
+{% if tse.serial_number %}
+TSE-Seriennummer:
+{{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
+{% else %}
+{% if tse.training %}
+<<CENTER>><<BOLD>>TRAININGSBUCHUNG - KEIN VERKAUF<</BOLD>><</CENTER>>
+{% endif %}
+Kassen-ID: {{ tse.client_id }}
+TSE-Seriennummer:
+{{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
+TSE-Transaktion: {{ tse.transaction_number }}
+Signaturzaehler: {{ tse.signature_counter }}
+Start: {{ tse.start_time }}
+Ende:  {{ tse.finish_time }}
+Algorithmus: {{ tse.signature_algorithm }}
+Zeitformat: {{ tse.log_time_format }}
+Signatur:
+{{ tse.signature|wordwrap(tse_cols, true, "\n") }}
+{% if tse.qr_code %}
+<<CENTER>><<QRCODE:{{ tse.qr_code }}>><</CENTER>>
+{% endif %}
+{% endif %}
+{% endif %}
 {{ line }}
 <<CENTER>>Betrag erhalten:<</CENTER>>
 
