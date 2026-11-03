@@ -219,3 +219,131 @@ class TestRefundTemplates:
         assert "-2x Pommes" in result
         assert "ohne Salz" in result
         assert "Grund: Wunsch des Gastes" in result
+
+
+# Kassenbeleg mit Cloud-TSE (Vertrag: tse-swissbit-plan.md §8.6). Werte aus
+# einem echten Beleg der Swissbit-Entwicklungsumgebung.
+TSE_SERIAL = "2d38954f7b7307eb0f90abe12fc4c75fb0e67c51528a47e39f3690b4b9fb162a"
+TSE_SIGNATURE = "vd4M3r28Ajy+h9awoxaCREPADXzr3CyVM720RM/W0fMXPGy/fYr6l5i6mMw31+Tij7gi9xZwqoIb0P/B2Cv7HQ=="
+TSE_PUBLIC_KEY = "BOMQhrdbaRAdsY+lwgytAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+TSE_QR = (
+    "V0;OEOS-2BDA366D6B8D;Kassenbeleg-V1;Beleg^9.00_3.50_0.00_0.00_0.00^12.50:Bar;84;183;"
+    "2026-11-03T16:02:33.000Z;2026-11-03T16:02:34.000Z;ecdsa-plain-SHA256;unixTime;"
+    f"{TSE_SIGNATURE};{TSE_PUBLIC_KEY}"
+)
+
+
+def tse_block(**overrides):
+    block = {
+        "status": "signed",
+        "failed": False,
+        "training": False,
+        "notice": None,
+        "process_type": "Kassenbeleg-V1",
+        "serial_number": TSE_SERIAL,
+        "client_id": "OEOS-2BDA366D6B8D",
+        "transaction_number": 84,
+        "signature_counter": 183,
+        "start_time": "2026-11-03T16:02:33.000Z",
+        "finish_time": "2026-11-03T16:02:34.000Z",
+        "signature": TSE_SIGNATURE,
+        "signature_algorithm": "ecdsa-plain-SHA256",
+        "log_time_format": "unixTime",
+        "public_key": TSE_PUBLIC_KEY,
+        "qr_code": TSE_QR,
+    }
+    block.update(overrides)
+    return block
+
+
+def unwrap(text: str) -> str:
+    """Zeilen ohne Umbruch zusammenfuegen (Seriennummer, Signatur)."""
+    return "".join(line.strip() for line in text.splitlines())
+
+
+class TestTseReceipt:
+    @pytest.mark.parametrize("paper", [80, 58])
+    def test_signed_receipt_prints_all_tse_fields(self, sample_print_job, paper):
+        engine = TemplateEngine()
+        result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": paper, "tse": tse_block()})
+        cols = 42 if paper == 80 else 32
+        assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
+        assert "TSE-Transaktion: 84" in result
+        assert "Signaturzaehler: 183" in result
+        # Zeiten in UTC wie geliefert, nicht umgerechnet.
+        assert "Start: 2026-11-03T16:02:33.000Z" in result
+        assert "Ende:  2026-11-03T16:02:34.000Z" in result
+        assert "Algorithmus: ecdsa-plain-SHA256" in result
+        assert "Zeitformat: unixTime" in result
+        # Seriennummer und Signatur ungekuerzt, nur umbrochen.
+        assert TSE_SERIAL in unwrap(result)
+        assert TSE_SIGNATURE in unwrap(result)
+        tse_section = result[result.index("Kassen-ID") :]
+        for line in tse_section.splitlines():
+            if "<<" not in line:
+                assert len(line) <= cols, line
+        assert f"<<QRCODE:{TSE_QR}>>" in result
+        assert "TSE ausgefallen" not in result
+        assert "TRAININGSBUCHUNG" not in result
+
+    def test_failed_tse_prints_notice_without_signature(self, sample_print_job):
+        engine = TemplateEngine()
+        block = tse_block(
+            status="failed",
+            failed=True,
+            notice="TSE ausgefallen",
+            transaction_number=None,
+            signature_counter=None,
+            start_time=None,
+            finish_time=None,
+            signature=None,
+            qr_code=None,
+        )
+        result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": block})
+        assert "<<BOLD>>TSE ausgefallen<</BOLD>>" in result
+        assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
+        assert "TSE-Transaktion" not in result
+        assert "Signatur:" not in result
+        assert "QRCODE" not in result.replace("qr_url", "")
+
+    def test_pending_counts_as_failed(self, sample_print_job):
+        engine = TemplateEngine()
+        block = tse_block(status="pending", failed=True, signature=None, qr_code=None)
+        result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": block})
+        assert "TSE ausgefallen" in result
+
+    def test_training_receipt_is_marked(self, sample_print_job):
+        engine = TemplateEngine()
+        qr = TSE_QR.replace("Beleg^", "AVTraining^")
+        block = tse_block(status="training", training=True, notice="TRAININGSBUCHUNG – KEIN VERKAUF", qr_code=qr)
+        result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 58, "tse": block})
+        assert "<<BOLD>>TRAININGSBUCHUNG - KEIN VERKAUF<</BOLD>>" in result
+        assert f"<<QRCODE:{qr}>>" in result
+
+    def test_receipt_without_tse_is_unchanged(self, sample_print_job):
+        engine = TemplateEngine()
+        for tse in (None, {}):
+            result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": tse})
+            assert "Kassen-ID" not in result
+            assert "TSE" not in result
+
+    def test_refund_receipt_prints_tse_block(self):
+        engine = TemplateEngine()
+        qr = TSE_QR.replace("Beleg^9.00_3.50_0.00_0.00_0.00^12.50:Bar", "Beleg^-4.50_0.00_0.00_0.00_0.00^-4.50:Bar")
+        payload = {
+            "paper_width": 80,
+            "organization": {"name": "Test Verein"},
+            "refund_number": "E-0001",
+            "order_number": "20261103-0001",
+            "created_at": "2026-11-03T16:10:00Z",
+            "items": [{"quantity": 1, "name": "Bier", "total": -4.5}],
+            "total": -4.5,
+            "payment_method": "cash",
+            "device_name": "Kasse 1",
+            "tse": tse_block(qr_code=qr, transaction_number=85, signature_counter=185),
+        }
+        result = engine.render("refund_receipt", payload)
+        assert "Kasse: Kasse 1" in result
+        assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
+        assert "TSE-Transaktion: 85" in result
+        assert f"<<QRCODE:{qr}>>" in result
