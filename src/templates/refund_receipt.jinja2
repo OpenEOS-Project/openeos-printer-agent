@@ -1,16 +1,19 @@
-{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{# Zeichen pro Zeile: `columns` des Druckers, sonst 42 (80 mm) bzw. 32 (58 mm).
+   Keine Zeile darf breiter sein, BIG zaehlt doppelt. #}
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {% set sep = "=" * cols %}
 {% set line = "-" * cols %}
+{% macro row(label, value) %}{{ label }}{{ value|rjust(cols - label|length) }}{% endmacro %}
 {% if is_test %}
-<<CENTER>><<BOLD>><<BIG>>*** TESTMODUS ***<</BIG>><</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>><<BIG>>** TESTMODUS **<</BIG>><</BOLD>><</CENTER>>
 
 {% endif %}
-<<CENTER>><<BIG>>{{ organization.name|default("OpenEOS") }}<</BIG>><</CENTER>>
+<<CENTER>><<BIG>>{{ organization.name|default("OpenEOS")|wordwrap(cols // 2, true, "\n") }}<</BIG>><</CENTER>>
 {% if organization.address is defined and organization.address %}
-<<CENTER>>{{ organization.address }}<</CENTER>>
+<<CENTER>>{{ organization.address|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% endif %}
 {% if organization.phone is defined and organization.phone %}
-<<CENTER>>Tel: {{ organization.phone }}<</CENTER>>
+<<CENTER>>{{ ("Tel: " ~ organization.phone)|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% endif %}
 <<CENTER>>{{ sep }}<</CENTER>>
 <<CENTER>><<BOLD>><<BIG>>{{ "STORNO" if refund_kind|default("refund") == "cancellation" else "ERSTATTUNG" }}<</BIG>><</BOLD>><</CENTER>>
@@ -19,64 +22,74 @@
 <<CENTER>><<BOLD>>-- NACHDRUCK --<</BOLD>><</CENTER>>
 {% endif %}
 {{ line }}
-<<BOLD>>Beleg {{ refund_number|default("---") }}<</BOLD>>
+<<BOLD>>{{ ("Beleg " ~ refund_number|default("---"))|wordwrap(cols, true, "\n") }}<</BOLD>>
 Datum: {{ created_at|strftime("%d.%m.%Y %H:%M") }}
-Zu Bestellung #{{ order_number|default("---") }}{% if daily_number is defined and daily_number %} (Nr. {{ daily_number }}){% endif %}
-
+{{ ("Zu Bestellung #" ~ order_number|default("---") ~ ((" (Nr. " ~ daily_number ~ ")") if daily_number is defined and daily_number else ""))|wordwrap(cols, true, "\n") }}
 {% if original_created_at is defined and original_created_at %}
 vom {{ original_created_at|strftime("%d.%m.%Y %H:%M") }}
 {% endif %}
 {% if table_number is defined and table_number %}
-Tisch: {{ table_number }}
+{{ ("Tisch: " ~ table_number)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {{ line }}
+{# Wie auf dem Kassenbeleg: Betrag rechtsbuendig, der Name bricht um. #}
 {% for item in items|default([]) %}
-{{ "%-4s"|format("-" ~ item.quantity ~ "x") }}{{ item.name.ljust(cols - 15)[:cols - 15] }} {{ item.total|currency|rjust(10) }}
+{% set qty = "%-3s"|format("-" ~ item.quantity ~ "x") %}
+{% set amount = item.total|currency %}
+{% set name_width = cols - qty|length - amount|length - 2 %}
+{% set name_lines = (item.name|wordwrap(name_width, true, "\n")).split("\n") %}
+{{ qty }} {{ name_lines[0].ljust(name_width) }} {{ amount }}
+{% for rest in name_lines[1:] %}
+{{ " " * (qty|length + 1) }}{{ rest }}
+{% endfor %}
 {% endfor %}
 {% if pfand_amount is defined and pfand_amount %}
-{{ "Pfand:".ljust(cols - 12) }}{{ pfand_amount|currency|rjust(12) }}
+{{ row("Pfand:", pfand_amount|currency) }}
 {% endif %}
 {% if tip_amount is defined and tip_amount %}
-{{ "Trinkgeld:".ljust(cols - 12) }}{{ tip_amount|currency|rjust(12) }}
+{{ row("Trinkgeld:", tip_amount|currency) }}
 {% endif %}
 {{ sep }}
 {% if tax_lines is defined and tax_lines %}
 {% for tl in tax_lines %}
-{{ ("enth. MwSt " ~ (tl.rate|int if tl.rate == tl.rate|int else tl.rate) ~ "%:").ljust(cols - 12) }}{{ tl.tax|currency|rjust(12) }}
+{{ row("enth. MwSt " ~ (tl.rate|int if tl.rate == tl.rate|int else tl.rate) ~ "%:", tl.tax|currency) }}
 {% endfor %}
 {% endif %}
-<<BOLD>>{{ "ERSTATTET:".ljust(cols - 12) }}{{ total|default(0)|currency|rjust(12) }}<</BOLD>>
+<<BOLD>>{{ row("ERSTATTET:", total|default(0)|currency) }}<</BOLD>>
 {{ line }}
-Rueckgabe: {{ payment_label|default(payment_method) }}
+{{ ("Rueckgabe: " ~ payment_label|default(payment_method))|wordwrap(cols, true, "\n") }}
 {% if refund_status is defined and refund_status == "manual" %}
 (manuell erstattet)
 {% endif %}
 {% if provider_reference is defined and provider_reference %}
-Transaktion: {{ provider_reference }}
+{{ ("Transaktion: " ~ provider_reference)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {% if reason is defined and reason %}
-Grund: {{ reason }}
+{{ ("Grund: " ~ reason)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {% if actor_name is defined and actor_name %}
-Bediener: {{ actor_name }}
+{{ ("Bediener: " ~ actor_name)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {% if device_name is defined and device_name %}
-Kasse: {{ device_name }}
+{{ ("Kasse: " ~ device_name)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {# TSE-Angaben nach AEAO zu § 146a Nr. 2.2 und DSFinV-K Anhang I (Vertrag:
-   tse-swissbit-plan.md §8.6): Kassen-ID (Client-ID), TSE-Seriennummer und
-   Signatur ungekuerzt (umbrochen), Transaktionsnummer, Signaturzaehler,
-   Start/Ende in UTC wie von der TSE geliefert, QR-Code (V0). Ohne Signatur
-   nur der Ausfallvermerk, bei Trainingsbuchungen der Trainingsvermerk.
-   Eigenstaendig (braucht weder `cols` noch `line`), damit die API den
-   Block auch an eigene Vorlagen haengen kann. #}
+   tse-swissbit-plan.md §8.6): Kassen-ID (Client-ID), Beleg-Nr.,
+   TSE-Seriennummer und Signatur ungekuerzt (umbrochen), Transaktionsnummer,
+   Signaturzaehler, Start/Ende in UTC wie von der TSE geliefert, QR-Code
+   (V0). Ohne Signatur nur der Ausfallvermerk, bei Trainingsbuchungen der
+   Trainingsvermerk. Eigenstaendig (braucht weder `cols` noch `line`), damit
+   die API den Block auch an eigene Vorlagen haengen kann. #}
 {% if tse is defined and tse %}
-{% set tse_cols = cols if cols is defined else (42 if paper_width|default(80) == 80 else 32) %}
+{% set tse_cols = cols if cols is defined else columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {{ "-" * tse_cols }}
 {% if tse.failed %}
 <<CENTER>><<BOLD>>TSE ausgefallen<</BOLD>><</CENTER>>
 <<CENTER>>Beleg ohne Signatur<</CENTER>>
-Kassen-ID: {{ tse.client_id }}
+{{ ("Kassen-ID: " ~ tse.client_id)|wordwrap(tse_cols, true, "\n") }}
+{% if tse.bon_number %}
+{{ ("Beleg-Nr.: " ~ tse.bon_number)|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
 {% if tse.serial_number %}
 TSE-Seriennummer:
 {{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
@@ -85,15 +98,18 @@ TSE-Seriennummer:
 {% if tse.training %}
 <<CENTER>><<BOLD>>TRAININGSBUCHUNG - KEIN VERKAUF<</BOLD>><</CENTER>>
 {% endif %}
-Kassen-ID: {{ tse.client_id }}
+{{ ("Kassen-ID: " ~ tse.client_id)|wordwrap(tse_cols, true, "\n") }}
+{% if tse.bon_number %}
+{{ ("Beleg-Nr.: " ~ tse.bon_number)|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
 TSE-Seriennummer:
 {{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
-TSE-Transaktion: {{ tse.transaction_number }}
-Signaturzaehler: {{ tse.signature_counter }}
-Start: {{ tse.start_time }}
-Ende:  {{ tse.finish_time }}
-Algorithmus: {{ tse.signature_algorithm }}
-Zeitformat: {{ tse.log_time_format }}
+{{ ("TSE-Transaktion: " ~ tse.transaction_number)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Signaturzaehler: " ~ tse.signature_counter)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Start: " ~ tse.start_time)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Ende:  " ~ tse.finish_time)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Algorithmus: " ~ tse.signature_algorithm)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Zeitformat: " ~ tse.log_time_format)|wordwrap(tse_cols, true, "\n") }}
 Signatur:
 {{ tse.signature|wordwrap(tse_cols, true, "\n") }}
 {% if tse.qr_code %}

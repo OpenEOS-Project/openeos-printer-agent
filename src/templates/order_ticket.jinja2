@@ -1,8 +1,12 @@
-{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{# Zeichen pro Zeile: `columns` des Druckers, sonst 42 (80 mm) bzw. 32 (58 mm).
+   Keine Zeile darf breiter sein, BIG zaehlt doppelt. #}
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {% set sep = "=" * cols %}
 {% set line = "-" * cols %}
+{% macro row(label, value) %}{{ label }}{{ value|rjust(cols - label|length) }}{% endmacro %}
+{% set no_prices = hide_prices|default(false) %}
 {% if is_test %}
-<<CENTER>><<BOLD>><<BIG>>*** TESTMODUS ***<</BIG>><</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>><<BIG>>** TESTMODUS **<</BIG>><</BOLD>><</CENTER>>
 
 {% endif %}
 <<CENTER>><<BIG>>BESTELLUNG<</BIG>><</CENTER>>
@@ -10,24 +14,42 @@
 <<CENTER>><<BIG>>#{{ daily_number|default(order_number|default("---")) }}<</BIG>><</CENTER>>
 {{ line }}
 {% if table_number is defined and table_number %}
-Tisch: {{ table_number }}
+{{ ("Tisch: " ~ table_number)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {% if customer_name is defined and customer_name %}
-Kunde: {{ customer_name }}
+{{ ("Kunde: " ~ customer_name)|wordwrap(cols, true, "\n") }}
 {% endif %}
 Datum: {{ created_at|strftime("%d.%m.%Y %H:%M") }}
 {{ sep }}
 {% for item in items|default([]) %}
-{{ "%-3s"|format(item.quantity ~ "x") }} {{ item.name.ljust(cols - 14) }} {{ item.total|currency|rjust(10) }}
+{% set qty = "%-3s"|format(item.quantity ~ "x") %}
+{% set amount = "" if no_prices else item.total|currency %}
+{% set name_width = cols - qty|length - amount|length - (1 if no_prices else 2) %}
+{% set name_lines = (item.name|wordwrap(name_width, true, "\n")).split("\n") %}
+{% if no_prices %}
+{{ qty }} {{ name_lines[0] }}
+{% else %}
+{{ qty }} {{ name_lines[0].ljust(name_width) }} {{ amount }}
+{% endif %}
+{% for rest in name_lines[1:] %}
+{{ " " * (qty|length + 1) }}{{ rest }}
+{% endfor %}
+{% if item.options is defined and item.options %}
+{% for opt in item.options %}
+     {{ opt|wordwrap(cols - 5, true, "\n     ") }}
+{% endfor %}
+{% endif %}
 {% if item.notes %}
-     {{ item.notes }}
+     {{ item.notes|wordwrap(cols - 5, true, "\n     ") }}
 {% endif %}
 {% endfor %}
 {{ sep }}
-<<BOLD>>{{ "GESAMT:".ljust(cols - 12) }}{{ total|default(0)|currency|rjust(12) }}<</BOLD>>
+{% if not no_prices %}
+<<BOLD>>{{ row("GESAMT:", total|default(0)|currency) }}<</BOLD>>
 {% if payment_method is defined %}
 {{ line }}
-Zahlungsart: {{ payment_label|default(payment_method) }}
+{{ ("Zahlungsart: " ~ payment_label|default(payment_method))|wordwrap(cols, true, "\n") }}
+{% endif %}
 {% endif %}
 <<FEED:3>>
 <<CUT>>

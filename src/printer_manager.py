@@ -52,6 +52,9 @@ class ManagedPrinter:
         self.fingerprint: Optional[str] = config.get("fingerprint")
         self.connection_type: str = config.get("connectionType", "usb")
         self.paper_width: int = config.get("paperWidth", 80)
+        # Characters per line when the printer differs from the paper default
+        # (42 on 80 mm, 32 on 58 mm), e.g. 48 on 80 mm printers with 576 dots.
+        self.columns: Optional[int] = config.get("columns") or None
         self.connection_config: dict[str, Any] = config.get("connectionConfig") or {}
         self.status = PrinterStatus.OFFLINE
         self.last_error: Optional[str] = None
@@ -290,6 +293,8 @@ class PrinterManager:
         if existing.connection_type != new_cfg.get("connectionType", ""):
             return True
         if existing.paper_width != new_cfg.get("paperWidth", 80):
+            return True
+        if existing.columns != (new_cfg.get("columns") or None):
             return True
         if existing.connection_config != (new_cfg.get("connectionConfig") or {}):
             return True

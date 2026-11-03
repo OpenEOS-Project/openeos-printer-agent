@@ -1,8 +1,10 @@
-{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{# Zeichen pro Zeile: `columns` des Druckers, sonst 42 (80 mm) bzw. 32 (58 mm).
+   Keine Zeile darf breiter sein, BIG zaehlt doppelt. #}
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {% set sep = "=" * cols %}
 {% set box = "#" * cols %}
 {% if is_test %}
-<<CENTER>><<BOLD>><<BIG>>*** TESTMODUS ***<</BIG>><</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>><<BIG>>** TESTMODUS **<</BIG>><</BOLD>><</CENTER>>
 
 {% endif %}
 {{ box }}
@@ -12,25 +14,25 @@
 
 <<CENTER>><<BIG>>#{{ daily_number|default(order_number|default("---")) }}<</BIG>><</CENTER>>
 {% if table_number is defined and table_number %}
-<<CENTER>><<BOLD>>TISCH {{ table_number }}<</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>>{{ ("TISCH " ~ table_number)|wordwrap(cols, true, "\n") }}<</BOLD>><</CENTER>>
 {% endif %}
 {% if station_name is defined and station_name %}
-<<CENTER>>Station: {{ station_name }}<</CENTER>>
+<<CENTER>>{{ ("Station: " ~ station_name)|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% endif %}
 {{ sep }}
 <<LEFT>>
 {% for item in items|default([]) %}
-<<BOLD>><<BIG>>-{{ item.quantity }}x {{ item.name }}<</BIG>><</BOLD>>
+<<BOLD>><<BIG>>{{ ("-" ~ item.quantity ~ "x " ~ item.name)|wordwrap(cols // 2, true, "\n") }}<</BIG>><</BOLD>>
 {% if item.options is defined and item.options %}
 {% for opt in item.options %}
-    {{ opt }}
+    {{ opt|wordwrap(cols - 4, true, "\n    ") }}
 {% endfor %}
 {% endif %}
 
 {% endfor %}
 {{ sep }}
 {% if reason is defined and reason %}
-Grund: {{ reason }}
+{{ ("Grund: " ~ reason)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {% if created_at is defined and created_at %}
 Storniert: {{ created_at|strftime("%d.%m.%Y %H:%M") }}

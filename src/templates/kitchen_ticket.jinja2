@@ -1,4 +1,6 @@
-{% set cols = 42 if paper_width|default(80) == 80 else 32 %}
+{# Zeichen pro Zeile: `columns` des Druckers, sonst 42 (80 mm) bzw. 32 (58 mm).
+   Keine Zeile darf breiter sein, BIG zaehlt doppelt. #}
+{% set cols = columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {% set sep = "=" * cols %}
 {% set line = "-" * cols %}
 {% set box = "#" * cols %}
@@ -14,7 +16,7 @@
 {% endif %}
 
 {% if is_test %}
-<<CENTER>><<BOLD>><<BIG>>*** TESTMODUS ***<</BIG>><</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>><<BIG>>** TESTMODUS **<</BIG>><</BOLD>><</CENTER>>
 
 {% endif %}
 <<CENTER>><<BIG>>K U E C H E<</BIG>><</CENTER>>
@@ -27,7 +29,7 @@
 {% if channel == "service" %}
 <<CENTER>><<BOLD>>>> BEDIENUNG <<<</BOLD>><</CENTER>>
 {% if table_number is defined and table_number %}
-<<CENTER>><<BIG>>TISCH {{ table_number }}<</BIG>><</CENTER>>
+<<CENTER>><<BIG>>{{ ("TISCH " ~ table_number)|wordwrap(cols // 2, true, "\n") }}<</BIG>><</CENTER>>
 {% else %}
 <<CENTER>><<BOLD>>TISCH UNBEKANNT<</BOLD>><</CENTER>>
 {% endif %}
@@ -35,13 +37,13 @@
 <<CENTER>><<BOLD>>>> ONLINE <<<</BOLD>><</CENTER>>
 <<CENTER>><<BIG>>ABHOLUNG<</BIG>><</CENTER>>
 {% if customer_name is defined and customer_name %}
-<<CENTER>><<BOLD>>{{ customer_name }}<</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>>{{ customer_name|wordwrap(cols, true, "\n") }}<</BOLD>><</CENTER>>
 {% endif %}
 {% else %}
 <<CENTER>><<BOLD>>>> SB-KASSE <<<</BOLD>><</CENTER>>
 <<CENTER>>Ausgabe an der Theke<</CENTER>>
 {% if customer_name is defined and customer_name %}
-<<CENTER>>{{ customer_name }}<</CENTER>>
+<<CENTER>>{{ customer_name|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% endif %}
 {% endif %}
 {{ box }}
@@ -55,22 +57,22 @@
 Bestellt: {{ created_at|strftime("%H:%M") }}
 {% endif %}
 {% if station_name is defined and station_name %}
-Station: {{ station_name }}
+{{ ("Station: " ~ station_name)|wordwrap(cols, true, "\n") }}
 {% endif %}
 {{ sep }}
 
 <<LEFT>>
 {% for item in items|default([]) %}
-<<BOLD>><<BIG>>{{ item.quantity }}x {{ item.name }}<</BIG>><</BOLD>>
+<<BOLD>><<BIG>>{{ (item.quantity ~ "x " ~ item.name)|wordwrap(cols // 2, true, "\n") }}<</BIG>><</BOLD>>
 {% if item.notes %}
-    >> {{ item.notes }}
+    {{ (">> " ~ item.notes)|wordwrap(cols - 4, true, "\n    ") }}
 {% endif %}
 {% if item.kitchen_notes %}
-    KUECHE: {{ item.kitchen_notes }}
+    {{ ("KUECHE: " ~ item.kitchen_notes)|wordwrap(cols - 4, true, "\n    ") }}
 {% endif %}
 {% if item.options is defined and item.options %}
 {% for opt in item.options %}
-    {{ opt }}
+    {{ opt|wordwrap(cols - 4, true, "\n    ") }}
 {% endfor %}
 {% endif %}
 
@@ -79,10 +81,10 @@ Station: {{ station_name }}
 
 {% if order_item_id is defined and order_item_id %}
 <<CENTER>><<BARCODE:CODE128:{{ order_item_id }}>><</CENTER>>
-<<CENTER>>{{ order_item_id }}<</CENTER>>
+<<CENTER>>{{ order_item_id|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% elif order_id is defined and order_id %}
 <<CENTER>><<BARCODE:CODE128:{{ order_id }}>><</CENTER>>
-<<CENTER>>{{ order_id }}<</CENTER>>
+<<CENTER>>{{ order_id|wordwrap(cols, true, "\n") }}<</CENTER>>
 {% endif %}
 
 {% if created_at is defined and created_at %}
