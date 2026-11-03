@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from src.template_engine import TemplateEngine, _filter_currency, _filter_strftime
@@ -65,6 +67,61 @@ class TestTemplateEngine:
         payload = {**sample_print_job["payload"], "paper_width": 80, "payment_method": "cash", "change": 4.5}
         result = engine.render("receipt", payload)
         assert "Rueckgeld: 4,50 EUR" in result
+
+    def test_receipt_prints_payment_label(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {**sample_print_job["payload"], "paper_width": 80, "payment_method": "cash", "payment_label": "Bar"}
+        result = engine.render("receipt", payload)
+        assert "Zahlungsart: Bar" in result
+        assert "cash" not in result
+
+    def test_receipt_falls_back_to_raw_method_without_label(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {**sample_print_job["payload"], "paper_width": 80, "payment_method": "card"}
+        result = engine.render("receipt", payload)
+        assert "Zahlungsart: card" in result
+
+    def test_order_ticket_prints_payment_label(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": 80,
+            "payment_method": "sumup_terminal",
+            "payment_label": "Karte (SumUp)",
+        }
+        result = engine.render("order_ticket", payload)
+        assert "Zahlungsart: Karte (SumUp)" in result
+
+    @pytest.mark.parametrize(
+        "organization",
+        [
+            {"name": "Test Verein", "address": "", "phone": ""},
+            {"name": "Test Verein", "address": None, "phone": None},
+            {"name": "Test Verein"},
+        ],
+    )
+    def test_receipt_header_skips_empty_address_and_phone(self, sample_print_job, organization):
+        engine = TemplateEngine()
+        payload = {**sample_print_job["payload"], "paper_width": 80, "organization": organization}
+        result = engine.render("receipt", payload)
+        assert "undefined" not in result
+        assert "None" not in result
+        assert "Tel:" not in result
+        lines = [re.sub(r"<</?[A-Z]+(:[^>]*)?>>", "", line).strip() for line in result.splitlines()]
+        name_at = next(i for i, line in enumerate(lines) if "Test Verein" in line)
+        # Direkt nach dem Namen die Trennlinie, keine leere Adresszeile.
+        assert set(lines[name_at + 1]) == {"="}
+
+    def test_receipt_header_prints_address(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": 80,
+            "organization": {"name": "Test Verein", "address": "Weg 1, 12345 Ort", "phone": "0123"},
+        }
+        result = engine.render("receipt", payload)
+        assert "Weg 1, 12345 Ort" in result
+        assert "Tel: 0123" in result
 
     def test_render_kitchen(self, sample_kitchen_job):
         engine = TemplateEngine()
