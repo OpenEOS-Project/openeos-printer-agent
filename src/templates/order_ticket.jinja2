@@ -27,7 +27,7 @@ Datum: {{ created_at|strftime("%d.%m.%Y %H:%M") }}
 <<BOLD>>{{ "GESAMT:".ljust(cols - 12) }}{{ total|default(0)|currency|rjust(12) }}<</BOLD>>
 {% if payment_method is defined %}
 {{ line }}
-Zahlungsart: {{ payment_method }}
+Zahlungsart: {{ payment_label|default(payment_method) }}
 {% endif %}
 <<FEED:3>>
 <<CUT>>
