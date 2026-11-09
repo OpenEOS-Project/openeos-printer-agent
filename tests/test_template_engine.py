@@ -132,6 +132,15 @@ class TestTemplateEngine:
         assert "ohne Senf" in result
         assert "extra knusprig" in result
 
+    def test_kitchen_shows_waiter_only_when_known(self, sample_kitchen_job):
+        engine = TemplateEngine()
+        payload = {**sample_kitchen_job["payload"], "paper_width": 80}
+        result = engine.render("kitchen_ticket", {**payload, "waiter_name": "Handy Markus"})
+        assert "Bedienung: Handy Markus" in result
+        for missing in ({"waiter_name": None}, {"waiter_name": ""}, {}):
+            result = engine.render("kitchen_ticket", {**payload, **missing})
+            assert "Bedienung" not in result
+
     def test_render_order(self, sample_print_job):
         engine = TemplateEngine()
         result = engine.render("order_ticket", {**sample_print_job["payload"], "paper_width": 80})
@@ -452,6 +461,7 @@ LONG_COMMON = {
     "reason": "Qualitaet: " + LONG_TEXT,
     "actor_name": "Maximiliane Mustermann-Schmidtbauer",
     "device_name": "Kasse 3 am Haupteingang neben der Buehne",
+    "waiter_name": "Handy von Maximiliane Mustermann-Schmidtbauer",
     "printerName": "EPSON TM-T20III Theke links (Netzwerk)",
     "jobId": "job-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
     "timestamp": "2026-11-03T16:02:33.000Z",

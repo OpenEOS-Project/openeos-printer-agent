@@ -56,6 +56,9 @@
 {% if created_at is defined and created_at %}
 Bestellt: {{ created_at|strftime("%H:%M") }}
 {% endif %}
+{% if waiter_name is defined and waiter_name %}
+{{ ("Bedienung: " ~ waiter_name)|wordwrap(cols, true, "\n") }}
+{% endif %}
 {% if station_name is defined and station_name %}
 {{ ("Station: " ~ station_name)|wordwrap(cols, true, "\n") }}
 {% endif %}
