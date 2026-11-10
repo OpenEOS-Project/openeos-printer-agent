@@ -50,7 +50,13 @@ vom {{ original_created_at|strftime("%d.%m.%Y %H:%M") }}
 {{ row("Trinkgeld:", tip_amount|currency) }}
 {% endif %}
 {{ sep }}
-{% if tax_lines is defined and tax_lines %}
+{# Kleinunternehmer (§ 19 UStG) weisen keine MwSt aus: statt der MwSt-Zeilen
+   der Hinweis auf die Steuerbefreiung. "§" fehlt in der Standard-Codepage
+   CP437 der Drucker; python-escpos muesste dafuer auf eine Codepage
+   umschalten, die viele Drucker anders belegen. Deshalb "Par.". #}
+{% if vat_exempt_notice is defined and vat_exempt_notice %}
+{{ vat_exempt_notice|replace("§", "Par.")|wordwrap(cols, true, "\n") }}
+{% elif tax_lines is defined and tax_lines %}
 {% for tl in tax_lines %}
 {{ row("enth. MwSt " ~ (tl.rate|int if tl.rate == tl.rate|int else tl.rate) ~ "%:", tl.tax|currency) }}
 {% endfor %}
@@ -77,22 +83,35 @@ vom {{ original_created_at|strftime("%d.%m.%Y %H:%M") }}
    tse-swissbit-plan.md §8.6): Kassen-ID (Client-ID), Beleg-Nr.,
    TSE-Seriennummer und Signatur ungekuerzt (umbrochen), Transaktionsnummer,
    Signaturzaehler, Start/Ende in UTC wie von der TSE geliefert, QR-Code
-   (V0). Ohne Signatur nur der Ausfallvermerk, bei Trainingsbuchungen der
+   (V0). Ohne Signatur nur der Ausfallvermerk (beim Nachdruck mit der
+   nachgeholten Signatur), bei Trainingsbuchungen der
    Trainingsvermerk. Eigenstaendig (braucht weder `cols` noch `line`), damit
    die API den Block auch an eigene Vorlagen haengen kann. #}
 {% if tse is defined and tse %}
 {% set tse_cols = cols if cols is defined else columns|default(42 if paper_width|default(80) == 80 else 32, true)|int %}
 {{ "-" * tse_cols }}
 {% if tse.failed %}
-<<CENTER>><<BOLD>>TSE ausgefallen<</BOLD>><</CENTER>>
+<<CENTER>><<BOLD>>TSE nicht erreichbar<</BOLD>><</CENTER>>
 <<CENTER>>Beleg ohne Signatur<</CENTER>>
 {{ ("Kassen-ID: " ~ tse.client_id)|wordwrap(tse_cols, true, "\n") }}
 {% if tse.bon_number %}
 {{ ("Beleg-Nr.: " ~ tse.bon_number)|wordwrap(tse_cols, true, "\n") }}
 {% endif %}
+{% if tse.order_start_time is defined and tse.order_start_time %}
+{{ ("Bestellbeginn: " ~ tse.order_start_time)|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
 {% if tse.serial_number %}
 TSE-Seriennummer:
 {{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
+{# Nachdruck eines Ausfallbelegs: die spaeter nachgeholte Signatur steht
+   nur als Text auf dem Beleg, nie als QR-Code (der Beleg selbst blieb
+   unsigniert). #}
+{% if tse.late_signature is defined and tse.late_signature %}
+Signatur nach Belegausgabe:
+{{ ("TSE-Transaktion: " ~ tse.late_signature.transaction_number)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Signaturzaehler: " ~ tse.late_signature.signature_counter)|wordwrap(tse_cols, true, "\n") }}
+{{ ("Ende:  " ~ tse.late_signature.finish_time)|wordwrap(tse_cols, true, "\n") }}
 {% endif %}
 {% else %}
 {% if tse.training %}
@@ -106,6 +125,11 @@ TSE-Seriennummer:
 {{ tse.serial_number|wordwrap(tse_cols, true, "\n") }}
 {{ ("TSE-Transaktion: " ~ tse.transaction_number)|wordwrap(tse_cols, true, "\n") }}
 {{ ("Signaturzaehler: " ~ tse.signature_counter)|wordwrap(tse_cols, true, "\n") }}
+{# Bestellbeginn (DSFinV-K Tz. 2.7.3): Beginn des Vorgangs, wenn er vor
+   dem Start der Kassenbeleg-Transaktion liegt. #}
+{% if tse.order_start_time is defined and tse.order_start_time %}
+{{ ("Bestellbeginn: " ~ tse.order_start_time)|wordwrap(tse_cols, true, "\n") }}
+{% endif %}
 {{ ("Start: " ~ tse.start_time)|wordwrap(tse_cols, true, "\n") }}
 {{ ("Ende:  " ~ tse.finish_time)|wordwrap(tse_cols, true, "\n") }}
 {{ ("Algorithmus: " ~ tse.signature_algorithm)|wordwrap(tse_cols, true, "\n") }}

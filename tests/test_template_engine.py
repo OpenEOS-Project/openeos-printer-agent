@@ -349,7 +349,7 @@ class TestTseReceipt:
             if "<<" not in line:
                 assert len(line) <= cols, line
         assert f"<<QRCODE:{TSE_QR}>>" in result
-        assert "TSE ausgefallen" not in result
+        assert "TSE nicht erreichbar" not in result
         assert "TRAININGSBUCHUNG" not in result
 
     def test_failed_tse_prints_notice_without_signature(self, sample_print_job):
@@ -366,7 +366,9 @@ class TestTseReceipt:
             qr_code=None,
         )
         result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": block})
-        assert "<<BOLD>>TSE ausgefallen<</BOLD>>" in result
+        assert "<<BOLD>>TSE nicht erreichbar<</BOLD>>" in result
+        assert "Beleg ohne Signatur" in result
+        assert "TSE ausgefallen" not in result
         assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
         assert "TSE-Transaktion" not in result
         assert "Signatur:" not in result
@@ -376,7 +378,7 @@ class TestTseReceipt:
         engine = TemplateEngine()
         block = tse_block(status="pending", failed=True, signature=None, qr_code=None)
         result = engine.render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": block})
-        assert "TSE ausgefallen" in result
+        assert "TSE nicht erreichbar" in result
 
     def test_training_receipt_is_marked(self, sample_print_job):
         engine = TemplateEngine()
@@ -413,6 +415,196 @@ class TestTseReceipt:
         assert "Kassen-ID: OEOS-2BDA366D6B8D" in result
         assert "TSE-Transaktion: 85" in result
         assert f"<<QRCODE:{qr}>>" in result
+
+
+VAT_EXEMPT_NOTICE = "Steuerfrei nach § 19 Abs. 1 UStG (Kleinunternehmer)"
+LATE_SIGNATURE = {
+    "note": "Signatur nach Belegausgabe",
+    "transaction_number": 97,
+    "signature_counter": 201,
+    "finish_time": "2026-11-03T16:41:07.000Z",
+}
+ORDER_START = "2026-11-03T15:58:12.000Z"
+
+
+def failed_tse_block(**overrides):
+    """Ausfallbeleg: ohne Transaktion und Signatur, QR-Code bleibt leer."""
+    block = tse_block(
+        status="failed",
+        failed=True,
+        transaction_number=None,
+        signature_counter=None,
+        start_time=None,
+        finish_time=None,
+        signature=None,
+        qr_code=None,
+    )
+    block.update(overrides)
+    return block
+
+
+def printed_lines(text: str) -> list[str]:
+    return [MARKUP.sub("", line).strip() for line in text.splitlines()]
+
+
+class TestFiscalNotes:
+    """Hinweise aus der Steuerberater-Pruefung 2026-11-10 (Fragen 3, 9, 16, 19)."""
+
+    @pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+    def test_late_signature_on_reprinted_outage_receipt(self, sample_print_job, name):
+        # Auch ein (versehentlich) mitgeschickter QR-Code darf im Ausfallzweig
+        # nie gedruckt werden: der Beleg selbst blieb unsigniert.
+        block = failed_tse_block(late_signature=LATE_SIGNATURE, qr_code=TSE_QR, bon_number=12)
+        payload = {**sample_print_job["payload"], "paper_width": 80, "reprint": True, "tse": block}
+        result = TemplateEngine().render(name, payload)
+        lines = printed_lines(result)
+        assert "TSE nicht erreichbar" in lines
+        assert "Beleg ohne Signatur" in lines
+        start = lines.index("Signatur nach Belegausgabe:")
+        assert start > lines.index("Beleg ohne Signatur")
+        assert lines[start + 1 : start + 4] == [
+            "TSE-Transaktion: 97",
+            "Signaturzaehler: 201",
+            "Ende:  2026-11-03T16:41:07.000Z",
+        ]
+        assert "QRCODE" not in result
+        assert "Signatur:" not in lines
+
+    def test_failed_tse_without_late_signature(self, sample_print_job):
+        for late in (None, {}):
+            block = failed_tse_block(late_signature=late)
+            payload = {**sample_print_job["payload"], "paper_width": 80, "tse": block}
+            result = TemplateEngine().render("receipt", payload)
+            assert "Signatur nach Belegausgabe" not in result
+            assert "TSE-Transaktion" not in result
+
+    def test_late_signature_is_ignored_on_signed_receipts(self, sample_print_job):
+        block = tse_block(late_signature=LATE_SIGNATURE)
+        result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "paper_width": 80, "tse": block})
+        assert "Signatur nach Belegausgabe" not in result
+        assert "TSE-Transaktion: 84" in result
+
+    @pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+    def test_order_start_time_in_signed_branch(self, sample_print_job, name):
+        block = tse_block(order_start_time=ORDER_START)
+        result = TemplateEngine().render(name, {**sample_print_job["payload"], "paper_width": 80, "tse": block})
+        lines = printed_lines(result)
+        begin = lines.index(f"Bestellbeginn: {ORDER_START}")
+        assert lines[begin + 1] == "Start: 2026-11-03T16:02:33.000Z"
+        assert lines[begin - 1] == "Signaturzaehler: 183"
+
+    @pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+    def test_order_start_time_in_failed_branch(self, sample_print_job, name):
+        block = failed_tse_block(order_start_time=ORDER_START, bon_number=12)
+        result = TemplateEngine().render(name, {**sample_print_job["payload"], "paper_width": 80, "tse": block})
+        lines = printed_lines(result)
+        begin = lines.index(f"Bestellbeginn: {ORDER_START}")
+        assert lines[begin - 1] == "Beleg-Nr.: 12"
+        assert lines[begin + 1] == "TSE-Seriennummer:"
+        assert "Start:" not in result
+
+    def test_order_start_time_wraps_on_58mm(self, sample_print_job):
+        block = tse_block(order_start_time=ORDER_START)
+        result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "paper_width": 58, "tse": block})
+        assert f"Bestellbeginn:{ORDER_START}" in unwrap(result)
+        assert all(width <= 32 for width, _ in printed_widths(result))
+
+    def test_order_start_time_missing_or_null(self, sample_print_job):
+        for block in (tse_block(), tse_block(order_start_time=None), failed_tse_block(order_start_time=None)):
+            payload = {**sample_print_job["payload"], "paper_width": 80, "tse": block}
+            result = TemplateEngine().render("receipt", payload)
+            assert "Bestellbeginn" not in result
+
+    def test_receipt_reprint_marker(self, sample_print_job):
+        payload = {**sample_print_job["payload"], "paper_width": 80, "is_test": True, "reprint": True}
+        result = TemplateEngine().render("receipt", payload)
+        assert "<<CENTER>><<BOLD>>-- NACHDRUCK --<</BOLD>><</CENTER>>" in result
+        # Unter dem Testmodus-Banner, ueber dem Kopf.
+        assert result.index("TESTMODUS") < result.index("NACHDRUCK") < result.index("Test Verein")
+        for reprint in (False, None):
+            result = TemplateEngine().render("receipt", {**payload, "reprint": reprint})
+            assert "NACHDRUCK" not in result
+        assert "NACHDRUCK" not in TemplateEngine().render("receipt", sample_print_job["payload"])
+
+    @pytest.mark.parametrize("cols, paper", [(32, 58), (42, 80)])
+    def test_tip_line_before_vat(self, sample_print_job, cols, paper):
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": paper,
+            "tip_amount": 1.5,
+            "total": 12.0,
+            "tax_lines": [{"rate": 19, "tax": 1.92}],
+        }
+        result = TemplateEngine().render("receipt", payload)
+        lines = printed_lines(result)
+        tip = next(i for i, line in enumerate(lines) if line.startswith("Trinkgeld:"))
+        assert lines[tip].endswith(" 1,50 EUR") and len(lines[tip]) == cols
+        assert tip < next(i for i, line in enumerate(lines) if line.startswith("enth. MwSt 19%:"))
+        assert tip < next(i for i, line in enumerate(lines) if line.startswith("GESAMT:"))
+        # GESAMT enthaelt das Trinkgeld bereits, die Vorlage rechnet nicht.
+        assert "12,00 EUR" in next(line for line in lines if line.startswith("GESAMT:"))
+
+    def test_no_tip_line_without_positive_tip(self, sample_print_job):
+        for tip in (None, 0, "0.00", -1):
+            result = TemplateEngine().render("receipt", {**sample_print_job["payload"], "tip_amount": tip})
+            assert "Trinkgeld" not in result
+
+    def test_discount_and_pfand_lines(self, sample_print_job):
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": 80,
+            "subtotal": 10.5,
+            "discount_amount": "1.50",
+            "pfand_total": "2.00",
+        }
+        lines = printed_lines(TemplateEngine().render("receipt", payload))
+        discount = next(i for i, line in enumerate(lines) if line.startswith("Rabatt:"))
+        pfand = next(i for i, line in enumerate(lines) if line.startswith("Pfand:"))
+        assert lines[discount].endswith(" -1,50 EUR") and len(lines[discount]) == 42
+        assert lines[pfand].endswith(" 2,00 EUR") and len(lines[pfand]) == 42
+        subtotal = next(i for i, line in enumerate(lines) if line.startswith("Zwischensumme:"))
+        assert subtotal < discount < pfand < next(i for i, line in enumerate(lines) if line.startswith("GESAMT:"))
+
+    def test_no_discount_or_pfand_lines_when_zero(self, sample_print_job):
+        for value in (None, 0, "0.00"):
+            payload = {**sample_print_job["payload"], "discount_amount": value, "pfand_total": value}
+            result = TemplateEngine().render("receipt", payload)
+            assert "Rabatt" not in result and "Pfand" not in result
+
+    @pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+    @pytest.mark.parametrize("cols, paper", [(32, 58), (42, 80)])
+    def test_vat_exempt_notice_replaces_vat_lines(self, sample_print_job, name, cols, paper):
+        payload = {
+            **sample_print_job["payload"],
+            "paper_width": paper,
+            "vat_exempt_notice": VAT_EXEMPT_NOTICE,
+            "tax_lines": [{"rate": 19, "tax": 1.68}],
+            "tax_amount": 1.68,
+        }
+        result = TemplateEngine().render(name, payload)
+        # "§" fehlt in CP437, auf Papier steht "Par.".
+        assert "§" not in result
+        assert "Steuerfrei nach Par. 19 Abs. 1 UStG (Kleinunternehmer)" in " ".join(printed_lines(result))
+        assert "MwSt" not in result
+        assert all(width <= cols for width, _ in printed_widths(result))
+        lines = printed_lines(result)
+        notice = next(i for i, line in enumerate(lines) if line.startswith("Steuerfrei"))
+        total = next(i for i, line in enumerate(lines) if line.startswith(("GESAMT:", "ERSTATTET:")))
+        assert notice < total
+
+    def test_vat_lines_without_notice(self, sample_print_job):
+        for notice in (None, ""):
+            tax_lines = [{"rate": 19, "tax": 1.68}]
+            payload = {**sample_print_job["payload"], "vat_exempt_notice": notice, "tax_lines": tax_lines}
+            result = TemplateEngine().render("receipt", payload)
+            assert "enth. MwSt 19%:" in result
+            assert "Steuerfrei" not in result
+
+    @pytest.mark.parametrize("name", ["receipt", "refund_receipt"])
+    def test_old_payloads_render_without_new_lines(self, sample_print_job, name):
+        result = TemplateEngine().render(name, {**sample_print_job["payload"], "tse": tse_block()})
+        for text in ("Bestellbeginn", "Signatur nach Belegausgabe", "Trinkgeld", "Steuerfrei", "Rabatt"):
+            assert text not in result
 
 
 # Zeilenbreite: Jede Vorlage muss bei 32 (58 mm), 42 (80 mm) und 48 Zeichen
@@ -472,6 +664,34 @@ WIDTH_CASES = [
     ("receipt", {"tse": tse_block(failed=True, signature=None, qr_code=None, bon_number=7)}),
     ("receipt", {"tse": tse_block(training=True, bon_number=8), "tax_lines": None, "tax_amount": 1.5}),
     ("refund_receipt", {"refund_kind": "cancellation", "tse": tse_block(bon_number=9)}),
+    # Alle Felder aus der Steuerberater-Pruefung 2026-11-10 auf einmal.
+    (
+        "receipt",
+        {
+            "tse": failed_tse_block(bon_number=10, order_start_time=ORDER_START, late_signature=LATE_SIGNATURE),
+            "discount_amount": 1234.5,
+            "pfand_total": 200.0,
+            "tip_amount": 1234.5,
+            "vat_exempt_notice": VAT_EXEMPT_NOTICE,
+        },
+    ),
+    (
+        "receipt",
+        {
+            "tse": tse_block(bon_number=11, order_start_time=ORDER_START),
+            "discount_amount": 1234.5,
+            "pfand_total": 200.0,
+            "tip_amount": 1234.5,
+        },
+    ),
+    (
+        "refund_receipt",
+        {
+            "tse": failed_tse_block(bon_number=12, order_start_time=ORDER_START, late_signature=LATE_SIGNATURE),
+            "vat_exempt_notice": VAT_EXEMPT_NOTICE,
+        },
+    ),
+    ("refund_receipt", {"tse": tse_block(bon_number=13, order_start_time=ORDER_START)}),
     ("order_ticket", {}),
     ("order_ticket", {"hide_prices": True}),
     ("kitchen_ticket", {"fulfillment_type": "table_service"}),
