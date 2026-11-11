@@ -8,7 +8,7 @@ metadata) and this constant is the fallback for a plain source checkout.
 
 from importlib import metadata
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 
 def get_version() -> str:
