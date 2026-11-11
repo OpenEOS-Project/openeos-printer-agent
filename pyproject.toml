@@ -45,6 +45,11 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 
+# Pfade in coverage.xml relativ zum Repo (src/...), damit Codecov sie
+# den Dateien zuordnet - auch bei den Laeufen auf Windows.
+[tool.coverage.run]
+relative_files = true
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120

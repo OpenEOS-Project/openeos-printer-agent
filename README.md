@@ -1,5 +1,7 @@
 # OpenEOS Printer Agent
 
+[![codecov](https://codecov.io/gh/OpenEOS-Project/openeos-printer-agent/branch/main/graph/badge.svg)](https://codecov.io/gh/OpenEOS-Project/openeos-printer-agent)
+
 Small service that runs on **any Linux or Windows PC** (Raspberry Pi included)
 next to your receipt printers. It **finds USB and network printers on its
 own**, reports them to the OpenEOS platform, and prints the jobs (receipts,

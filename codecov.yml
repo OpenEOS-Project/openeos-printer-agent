@@ -1,0 +1,25 @@
+# Codecov: Testabdeckung als Information, nie als Sperre.
+# Hochgeladen wird aus dem Test-Job in .github/workflows/ci.yml
+# (OIDC, kein Token noetig; PRs aus Forks laden ohne Token hoch).
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment:
+  layout: "condensed_header, condensed_files, condensed_footer"
+  behavior: default
+  require_changes: false
+
+flags:
+  printer-agent:
+    paths:
+      - src/
+
+ignore:
+  - "tests/**"
+  - "tools/**"
