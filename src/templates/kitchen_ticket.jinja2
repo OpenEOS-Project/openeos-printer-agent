@@ -52,6 +52,13 @@
 <<CENTER>><<BOLD>><<BIG>>!!! EILIG !!!<</BIG>><</BOLD>><</CENTER>>
 
 {% endif %}
+{# Die API konnte die Bestellung vor dem Bon nicht von der TSE absichern
+   (Ausfall). Der Ausfall ist protokolliert; der Bon sagt es dazu. #}
+{% if tse_outage is defined and tse_outage %}
+<<CENTER>><<BOLD>>TSE-AUSFALL<</BOLD>><</CENTER>>
+<<CENTER>>Bestellung nicht abgesichert<</CENTER>>
+
+{% endif %}
 {{ line }}
 {% if created_at is defined and created_at %}
 Bestellt: {{ created_at|strftime("%H:%M") }}
