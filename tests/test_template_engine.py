@@ -141,6 +141,23 @@ class TestTemplateEngine:
             result = engine.render("kitchen_ticket", {**payload, **missing})
             assert "Bedienung" not in result
 
+    def test_kitchen_marks_tse_outage(self, sample_kitchen_job):
+        engine = TemplateEngine()
+        payload = {**sample_kitchen_job["payload"], "paper_width": 80}
+        result = engine.render("kitchen_ticket", {**payload, "tse_outage": True})
+        assert "TSE-AUSFALL" in result
+        assert "Bestellung nicht abgesichert" in result
+        for missing in ({"tse_outage": False}, {}):
+            result = engine.render("kitchen_ticket", {**payload, **missing})
+            assert "TSE-AUSFALL" not in result
+
+    def test_receipt_prints_service_fee(self, sample_print_job):
+        engine = TemplateEngine()
+        payload = {**sample_print_job["payload"], "paper_width": 80}
+        result = engine.render("receipt", {**payload, "service_fee": 0.5})
+        assert "Servicegebuehr:" in result
+        assert "Servicegebuehr" not in engine.render("receipt", payload)
+
     def test_render_order(self, sample_print_job):
         engine = TemplateEngine()
         result = engine.render("order_ticket", {**sample_print_job["payload"], "paper_width": 80})
@@ -697,6 +714,7 @@ WIDTH_CASES = [
     ("kitchen_ticket", {"fulfillment_type": "table_service"}),
     ("kitchen_ticket", {"source": "online"}),
     ("kitchen_ticket", {"order_item_id": None}),
+    ("kitchen_ticket", {"tse_outage": True}),
     ("cancellation_ticket", {}),
     ("pickup", {}),
     ("_admin_test", {}),
