@@ -100,7 +100,6 @@ class TestRenderToPrinter:
         render_to_printer(printer, "")
         # Should not crash
 
-
     def _ops(self, printer):
         """Calls of interest in order: alignment changes and printed text."""
         ops = []
