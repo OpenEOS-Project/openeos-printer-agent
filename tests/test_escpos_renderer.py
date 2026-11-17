@@ -100,6 +100,51 @@ class TestRenderToPrinter:
         render_to_printer(printer, "")
         # Should not crash
 
+    def _ops(self, printer):
+        """Calls of interest in order: alignment changes and printed text."""
+        ops = []
+        for c in printer.mock_calls:
+            if c[0] == "text":
+                ops.append(("text", c.args[0]))
+            elif c[0] == "set" and "align" in c.kwargs:
+                ops.append(("align", c.kwargs["align"]))
+        return ops
+
+    def test_center_with_bold_commits_line_while_centered(self):
+        printer = self._make_printer()
+        render_to_printer(printer, "<<CENTER>><<BOLD>>Centered bold<</BOLD>><</CENTER>>")
+        assert self._ops(printer) == [
+            ("align", "center"),
+            ("text", "Centered bold"),
+            ("text", "\n"),
+            ("align", "left"),
+        ]
+
+    def test_center_with_big_and_bold_commits_line_while_centered(self):
+        printer = self._make_printer()
+        render_to_printer(
+            printer,
+            "<<CENTER>><<BIG>><<BOLD>>Centered large bold<</BOLD>><</BIG>><</CENTER>>",
+        )
+        assert self._ops(printer) == [
+            ("align", "center"),
+            ("text", "Centered large bold"),
+            ("text", "\n"),
+            ("align", "left"),
+        ]
+
+    def test_inline_style_mid_line_keeps_one_newline(self):
+        printer = self._make_printer()
+        render_to_printer(printer, "a <<BOLD>>b<</BOLD>> c")
+        texts = [c.args[0] for c in printer.mock_calls if c[0] == "text"]
+        assert "".join(texts) == "a b c\n"
+
+    def test_centered_header_has_no_extra_blank_line(self):
+        printer = self._make_printer()
+        render_to_printer(printer, "<<CENTER>>Header<</CENTER>>")
+        texts = [c.args[0] for c in printer.mock_calls if c[0] == "text"]
+        assert "".join(texts) == "Header\n"
+
 
 class TestHandleTag:
     def test_unknown_tag(self):

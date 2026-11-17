@@ -75,11 +75,17 @@ def _process_line(printer: Any, line: str) -> None:
 
     Newline accounting: if any flush-with-\n already happened on this input
     line, no trailing \n is added at end-of-line — otherwise we'd emit blank
-    lines after every centered header.
+    lines after every centered header. Text already sent by an inline flush
+    (`pending_line`) still needs its \n before the next alignment or block
+    command, so `<<CENTER>><<BOLD>>foo<</BOLD>><</CENTER>>` is committed
+    while center is active.
     """
     pos = 0
     text_buffer = ""
     emitted_newline_inline = False
+    # Text was sent without \n (inline style flush) and the physical line is
+    # still open.
+    pending_line = False
 
     while pos < len(line):
         match = TAG_PATTERN.search(line, pos)
@@ -99,13 +105,15 @@ def _process_line(printer: Any, line: str) -> None:
         needs_newline_flush = is_block or is_align
 
         if needs_newline_flush:
-            if text_buffer:
+            if text_buffer or pending_line:
                 printer.text(text_buffer + "\n")
                 text_buffer = ""
+                pending_line = False
                 emitted_newline_inline = True
         elif text_buffer:
             printer.text(text_buffer)
             text_buffer = ""
+            pending_line = True
 
         _handle_tag(printer, tag, arg)
 
@@ -114,10 +122,8 @@ def _process_line(printer: Any, line: str) -> None:
     # End-of-line: emit a \n only if we need one. We need one when there's
     # still buffered text, OR when nothing was emitted at all on this line
     # (so the input line still advances to a new physical line).
-    if text_buffer:
+    if text_buffer or pending_line or not emitted_newline_inline:
         printer.text(text_buffer + "\n")
-    elif not emitted_newline_inline:
-        printer.text("\n")
 
 
 def _handle_tag(printer: Any, tag: str, arg: Optional[str]) -> bool:
