@@ -60,7 +60,7 @@ jobs:
       # Action laedt dann ohne Token hoch, was Codecov fuer oeffentliche
       # Repos annimmt.
       - name: Abdeckung zu Codecov hochladen
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         continue-on-error: true
         with:
           use_oidc: true
@@ -173,7 +173,7 @@ jobs:
           cyclonedx-py environment --pyproject pyproject.toml --of JSON -o sbom.cdx.json /tmp/agent-env/bin/python
 
       - name: SBOM hochladen
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openeos-printer-agent-sbom.cdx.json
           path: sbom.cdx.json
