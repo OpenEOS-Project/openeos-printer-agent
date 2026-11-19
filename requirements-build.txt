@@ -1,2 +1,2 @@
 # PyInstaller for the release binaries (see openeos-printer-agent.spec).
-pyinstaller>=6.10,<7.0
+pyinstaller>=6.22.3,<7.0

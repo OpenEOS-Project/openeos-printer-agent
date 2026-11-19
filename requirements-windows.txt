@@ -2,4 +2,4 @@
 # optional pyusb path (WinUSB-bound printers).
 -r requirements.txt
 pywin32>=306
-libusb-package>=1.0.26
+libusb-package>=1.0.30.1
