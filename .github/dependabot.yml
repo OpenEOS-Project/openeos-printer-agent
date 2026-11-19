@@ -8,6 +8,9 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    # Untergrenzen nur anheben, wenn eine neue Version ausserhalb des
+    # erlaubten Bereichs liegt — sonst kommt fuer jede neue Version ein PR.
+    versioning-strategy: "increase-if-necessary"
     schedule:
       interval: "weekly"
       day: "monday"
