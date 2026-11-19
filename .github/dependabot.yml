@@ -27,6 +27,12 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    ignore:
+      # Das Abbild folgt der neuesten Python-Version aus der CI-Matrix
+      # (ci.yml) und dem PyInstaller-Build (release.yml). Neuere Versionen
+      # erst, wenn beide sie fuehren.
+      - dependency-name: "python"
+        versions: [">= 3.13"]
     labels: ["dependencies", "docker"]
 
   # Die Actions selbst altern genauso — und sie laufen mit Schreibrechten.
