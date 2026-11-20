@@ -8,6 +8,7 @@ capabilities data are bundled as data files; the Windows-only modules are
 listed as hidden imports so the service wrapper works in the frozen exe.
 """
 
+import os
 import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
@@ -50,19 +51,40 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name="openeos-printer-agent",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=True,
-    disable_windowed_traceback=False,
-    icon="packaging/icons/openeos-printer-agent.ico" if sys.platform.startswith("win") else None,
-)
+icon = "packaging/icons/openeos-printer-agent.ico" if sys.platform.startswith("win") else None
+
+# OPENEOS_ONEDIR=1: one-folder build for the Windows installer - the service
+# starts in about a second instead of unpacking ~30 MB to %TEMP% (and having
+# Defender scan it) on every start. Default: the single-file release binary.
+if os.environ.get("OPENEOS_ONEDIR") == "1":
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="openeos-printer-agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        icon=icon,
+    )
+    coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, strip=False, upx=False, name="openeos-printer-agent")
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name="openeos-printer-agent",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=True,
+        disable_windowed_traceback=False,
+        icon=icon,
+    )

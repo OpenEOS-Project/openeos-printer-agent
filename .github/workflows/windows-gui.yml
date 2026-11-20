@@ -60,6 +60,10 @@ jobs:
         run: |
           pyinstaller --clean --noconfirm openeos-printer-agent.spec
           pyinstaller --clean --noconfirm openeos-printer-agent-ui.spec
+          # one-folder service build for the installer (starts without unpacking)
+          $env:OPENEOS_ONEDIR = "1"
+          pyinstaller --noconfirm --distpath dist\service --workpath build\service openeos-printer-agent.spec
+          Remove-Item Env:OPENEOS_ONEDIR
           dist\openeos-printer-agent.exe --version
           Get-ChildItem dist
 

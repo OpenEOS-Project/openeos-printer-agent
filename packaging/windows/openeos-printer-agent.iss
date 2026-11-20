@@ -3,7 +3,7 @@
 ;   iscc /DAppVersion=0.3.0 packaging\windows\openeos-printer-agent.iss
 ;
 ; Expects the PyInstaller builds in dist\:
-;   dist\openeos-printer-agent.exe            (service, one file)
+;   dist\service\openeos-printer-agent\     (service, one folder: OPENEOS_ONEDIR=1)
 ;   dist\openeos-printer-agent-ui\            (window + tray, one folder)
 ;
 ; Installs both into Program Files, registers and starts the Windows service
@@ -111,14 +111,15 @@ Name: "autostart"; Description: "{cm:TaskAutostart}"
 Name: "desktopicon"; Description: "{cm:TaskDesktop}"; Flags: unchecked
 
 [Files]
-Source: "..\..\dist\{#ServiceExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\service\openeos-printer-agent\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\dist\openeos-printer-agent-ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
 Source: "..\..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"
 
 [InstallDelete]
-; Old window build from a previous version (file names change with Qt updates)
+; Old builds from a previous version (file names change with updates)
 Type: filesandordirs; Name: "{app}\ui"
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Icons]
 Name: "{autoprograms}\{cm:UiName}"; Filename: "{app}\ui\{#UiExe}"; WorkingDir: "{app}\ui"
