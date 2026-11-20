@@ -520,3 +520,120 @@ class TestWakeUp:
         client.reconnect_with_token = AsyncMock(side_effect=[OSError("net down"), OSError("still down"), None])
         await asyncio.wait_for(client.force_reconnect(), timeout=2)
         assert client.reconnect_with_token.await_count == 3
+
+
+# -- Windows spooler -------------------------------------------------------------------------
+
+from src import win_spooler as ws  # noqa: E402
+
+
+class FakeWin32Print:
+    """Spool queue: records documents, job status sequence per GetJob call."""
+
+    def __init__(self, statuses=(), printer_status=0, attributes=0):
+        self.docs: list[bytes] = []
+        self.open_docs = 0
+        self.handles_open = 0
+        self.statuses = list(statuses)  # what GetJob returns, then "gone"
+        self.cancelled: list[int] = []
+        self.printer_status = printer_status
+        self.attributes = attributes
+
+    def OpenPrinter(self, name):
+        self.handles_open += 1
+        return "h"
+
+    def ClosePrinter(self, h):
+        self.handles_open -= 1
+
+    def StartDocPrinter(self, h, level, info):
+        assert info[2] == "RAW"
+        self.open_docs += 1
+        self.docs.append(b"")
+        return 7
+
+    def StartPagePrinter(self, h):
+        pass
+
+    def WritePrinter(self, h, data):
+        self.docs[-1] += data
+
+    def EndPagePrinter(self, h):
+        pass
+
+    def EndDocPrinter(self, h):
+        self.open_docs -= 1
+
+    def GetJob(self, h, job_id, level):
+        if not self.statuses:
+            raise OSError(87, "GetJob", "job gone")
+        return {"Status": self.statuses.pop(0)}
+
+    def SetJob(self, h, job_id, level, info, command):
+        assert command == ws.JOB_CONTROL_DELETE
+        self.cancelled.append(job_id)
+
+    def GetPrinter(self, h, level):
+        return {"Status": self.printer_status, "Attributes": self.attributes}
+
+
+def _spooler(fake, timeout=1.0):
+    return ws.SpoolerTransport("Bondrucker", win32print=fake, timeout_s=timeout, poll_s=0, sleep=lambda s: None)
+
+
+class TestSpooler:
+    def test_one_closed_document_per_job(self):
+        fake = FakeWin32Print(statuses=[0x8, 0x10])  # spooling, printing, then gone
+        t = _spooler(fake)
+        t.send(b"A")
+        t.send(b"B")
+        assert fake.docs == [b"A", b"B"]
+        assert fake.open_docs == 0 and fake.handles_open == 0
+
+    def test_printed_flag_counts(self):
+        _spooler(FakeWin32Print(statuses=[ws.JOB_STATUS_PRINTED])).send(b"x")
+
+    @pytest.mark.parametrize(
+        "status,code",
+        [
+            (ws.JOB_STATUS_PAPEROUT, "PAPER_OUT"),
+            (ws.JOB_STATUS_OFFLINE, "PRINTER_OFFLINE"),
+            (ws.JOB_STATUS_ERROR, "PRINTER_OFFLINE"),
+        ],
+    )
+    def test_errors_cancel_the_job(self, status, code):
+        fake = FakeWin32Print(statuses=[status])
+        with pytest.raises(PrinterStatusError) as exc:
+            _spooler(fake).send(b"x")
+        assert exc.value.code == code
+        assert fake.cancelled == [7]  # retry cannot print it twice
+
+    def test_stuck_job_times_out_and_is_removed(self):
+        fake = FakeWin32Print(statuses=[ws.JOB_STATUS_PAUSED] * 1000)
+        with pytest.raises(PrinterNoConfirmation, match="paused"):
+            _spooler(fake, timeout=0).send(b"x")
+        assert fake.cancelled == [7]
+
+    def test_probe(self):
+        def problem(**kw):
+            state = _spooler(FakeWin32Print(**kw)).probe()
+            return state.problem[0] if state.problem else None
+
+        assert problem() is None
+        assert problem(printer_status=ws.PRINTER_STATUS_OFFLINE) == "PRINTER_OFFLINE"
+        assert problem(printer_status=ws.PRINTER_STATUS_PAPER_OUT) == "PAPER_OUT"
+        assert problem(attributes=ws.PRINTER_ATTRIBUTE_WORK_OFFLINE) == "PRINTER_OFFLINE"
+
+    async def test_managed_windows_printer_prints_each_ticket(self, monkeypatch):
+        from src import printer_manager
+
+        fake = FakeWin32Print()
+        monkeypatch.setattr(printer_manager, "win32print", fake)
+        printer = ManagedPrinter(
+            {"id": "w1", "name": "Theke", "connectionType": "windows", "connectionConfig": {"windowsPrinterName": "B"}}
+        )
+        assert await printer.connect()
+        await printer.execute(lambda p: p.text("eins\n"))
+        await printer.execute(lambda p: p.text("zwei\n"))
+        assert len(fake.docs) == 2 and b"eins" in fake.docs[0] and b"zwei" in fake.docs[1]
+        assert fake.open_docs == 0

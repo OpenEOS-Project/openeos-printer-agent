@@ -2,19 +2,20 @@ import asyncio
 import logging
 import socket
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from escpos.printer import Dummy, Usb
 
 from .escpos_text import escpos_to_text
 from .net_printer import NetworkTransport, PrinterNoConfirmation, PrinterStatusError
+from .win_spooler import SpoolerTransport
 
 logger = logging.getLogger(__name__)
 
 try:
-    from escpos.printer import Win32Raw
+    import win32print  # type: ignore[import-not-found,unused-ignore]
 except Exception:  # pragma: no cover - pywin32 missing outside Windows
-    Win32Raw = None
+    win32print = None
 
 EscposPrinter = Any
 
@@ -77,7 +78,7 @@ class ManagedPrinter:
         self._escpos: Optional[EscposPrinter] = None
         # Network printers: the escpos object only buffers (Dummy); the bytes
         # go out over a fresh, confirmed connection per job (net_printer.py).
-        self._transport: Optional[NetworkTransport] = None
+        self._transport: Optional[Union[NetworkTransport, SpoolerTransport]] = None
         self._lock = asyncio.Lock()
 
     @property
@@ -135,7 +136,7 @@ class ManagedPrinter:
             self._set_online()
             if log or was != self.status:
                 how = "status confirmed" if state is not None else "reachable, no status support"
-                logger.info(f"Printer '{self.name}' ({self.printer_id}) online via network ({how})")
+                logger.info(f"Printer '{self.name}' ({self.printer_id}) online via {self.connection_type} ({how})")
             return True
 
     def _set_online(self) -> None:
@@ -187,9 +188,12 @@ class ManagedPrinter:
             printer_name = conn.get("windowsPrinterName")
             if not printer_name:
                 raise ValueError(f"Windows printer '{self.name}' requires windowsPrinterName in connectionConfig")
-            if Win32Raw is None:
+            if win32print is None:
                 raise RuntimeError("Windows spooler printing requires pywin32 (connection type 'windows')")
-            return Win32Raw(str(printer_name))
+            # One spool document per job, watched until Windows printed it
+            # (escpos' Win32Raw keeps a single document open forever).
+            self._transport = SpoolerTransport(str(printer_name), win32print=win32print)
+            return Dummy()
 
         raise ValueError(f"Unsupported connection type: {self.connection_type}")
 
