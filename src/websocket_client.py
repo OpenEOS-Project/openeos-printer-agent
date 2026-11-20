@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import socketio
@@ -24,6 +25,16 @@ AuthErrorCallback = Callable[[str, bool], None]
 # this long (a removal check should be prompt, a restarting server needs a
 # moment), then double the delay up to ``reconnect_max_interval``.
 SERVER_DISCONNECT_RETRY_S = 2.0
+# printerJobComplete / printerJobFailed are sent with an ack request; the
+# gateway answers {"success": true} or {"error": ...}.
+REPORT_ACK_TIMEOUT_S = 10.0
+# Errors where sending the same report again cannot help.
+# "Job not found": the job was deleted on the server - resending cannot help.
+FINAL_ACK_ERRORS = frozenset({"Job not found"})
+# Announced in agentHeartbeat and the handshake: this agent dedupes printerJob
+# by jobId (~24 h) and resends outcomes until acknowledged, so the server may
+# re-send jobs that stay "printing" without an outcome.
+PROTOCOL_CAPABILITIES = {"idempotentJobs": True}
 SERVER_DISCONNECT = socketio.AsyncClient.reason.SERVER_DISCONNECT
 
 
@@ -207,7 +218,7 @@ class WebSocketClient:
 
         await self._sio.connect(
             url,
-            auth={"deviceToken": self._device_token},
+            auth={"deviceToken": self._device_token, "capabilities": dict(PROTOCOL_CAPABILITIES)},
             transports=["websocket"],
             wait_timeout=10,
         )
@@ -340,7 +351,7 @@ class WebSocketClient:
             "arch": identity["arch"],
             "hostname": identity["hostname"],
             "pythonVersion": identity["pythonVersion"],
-            "capabilities": self._capabilities() if self._capabilities else {},
+            "capabilities": {**(self._capabilities() if self._capabilities else {}), **PROTOCOL_CAPABILITIES},
             "printers": self._printer_manager.get_heartbeat_entries() if self._printer_manager else [],
         }
         return payload
@@ -362,44 +373,78 @@ class WebSocketClient:
 
         await self._sio.emit("agentHeartbeat", self.build_agent_heartbeat())
 
-    async def report_job_complete(self, job_id: str) -> bool:
+    async def _report(self, event: str, payload: dict[str, Any]) -> bool:
+        """Emit with acknowledgement. True only when the server confirmed it
+        (``{"success": true}``) or answered that retrying is pointless (job
+        unknown there). No answer within ``REPORT_ACK_TIMEOUT_S`` - e.g. the
+        connection died without us noticing yet - keeps the outcome in the
+        job store, it is sent again after the next (re)connect."""
+        if not self._connected:
+            return False
+        job_id = payload.get("jobId")
+        try:
+            ack = await self._sio.call(event, payload, timeout=REPORT_ACK_TIMEOUT_S)
+        except Exception as e:
+            logger.warning(f"{event} for job {job_id} not acknowledged ({type(e).__name__}: {e}); will resend")
+            return False
+        if isinstance(ack, dict) and ack.get("error"):
+            error = str(ack["error"])
+            if error in FINAL_ACK_ERRORS:
+                logger.warning(f"Server answered {event} for job {job_id} with '{error}' - not resending")
+                return True
+            logger.warning(f"Server could not store {event} for job {job_id} ({error}); will resend")
+            return False
+        logger.debug(f"{event} for job {job_id} acknowledged: {ack}")
+        return True
+
+    async def report_job_complete(
+        self, job_id: str, attempts: Optional[int] = None, printed_at: Optional[float] = None
+    ) -> bool:
         """Report successful job completion to server.
 
-        Returns True when the report reached the server; False lets the
-        caller keep the outcome in the job store for redelivery on reconnect.
+        Returns True when the server acknowledged the report; False lets the
+        caller keep the outcome in the job store for redelivery.
         """
-        if not self._connected:
-            return False
-        try:
-            await self._sio.emit(
-                "printerJobComplete",
-                {
-                    "jobId": job_id,
-                    "agentId": self._device_id,
-                },
-            )
-            logger.debug(f"Reported job {job_id} complete")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to report job {job_id} complete: {e}")
-            return False
+        payload: dict[str, Any] = {"jobId": job_id, "agentId": self._device_id}
+        if attempts:
+            payload["attempts"] = attempts
+        if printed_at:
+            payload["printedAt"] = _iso_utc(printed_at)
+        return await self._report("printerJobComplete", payload)
 
-    async def report_job_failed(self, job_id: str, error_code: str, error_message: str) -> bool:
-        """Report job failure to server. Returns True when delivered."""
-        if not self._connected:
-            return False
-        try:
-            await self._sio.emit(
-                "printerJobFailed",
-                {
-                    "jobId": job_id,
-                    "agentId": self._device_id,
-                    "errorCode": error_code,
-                    "errorMessage": error_message,
-                },
-            )
-            logger.debug(f"Reported job {job_id} failed: {error_code}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to report job {job_id} failure: {e}")
-            return False
+    async def report_job_failed(
+        self, job_id: str, error_code: str, error_message: str, attempts: Optional[int] = None
+    ) -> bool:
+        """Report job failure to server. Returns True when acknowledged."""
+        payload: dict[str, Any] = {
+            "jobId": job_id,
+            "agentId": self._device_id,
+            "errorCode": error_code,
+            "errorMessage": error_message,
+        }
+        if attempts:
+            payload["attempts"] = attempts
+        return await self._report("printerJobFailed", payload)
+
+    async def force_reconnect(self) -> None:
+        """Drop the socket and connect again right away (after the computer
+        woke up: the old TCP connection is dead, but the library would only
+        notice after its ping timeout)."""
+        logger.info("Rebuilding the server connection")
+        delay = self._config.server.reconnect_interval
+        while True:
+            try:
+                await self.reconnect_with_token(self._device_token, self._device_id)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Network not back yet (Wi-Fi reconnects after wake-up).
+                # A fresh client's first connect() does not retry by itself.
+                logger.warning(f"Reconnect after wake-up failed ({e}); next attempt in {delay:.0f}s")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._config.server.reconnect_max_interval)
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")

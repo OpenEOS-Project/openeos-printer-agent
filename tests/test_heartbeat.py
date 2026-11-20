@@ -26,12 +26,19 @@ class TestAgentHeartbeat:
 
         payload = client.build_agent_heartbeat()
 
-        assert payload["version"] == "0.2.6"
+        assert payload["version"] == "0.3.0"
         assert payload["os"] in ("linux", "windows", "darwin")
         assert payload["hostname"] == socket.gethostname()
         assert payload["pythonVersion"] == platform.python_version()
         assert payload["arch"] == normalize_arch(platform.machine())
-        assert payload["capabilities"] == {"usb": True, "mdns": True, "portscan": True, "spooler": False}
+        assert payload["capabilities"] == {
+            "usb": True,
+            "mdns": True,
+            "portscan": True,
+            "spooler": False,
+            # protocol: dedupes printerJob by jobId, resends outcomes until acked
+            "idempotentJobs": True,
+        }
         assert payload["printers"] == [
             {"fingerprint": "usb:04b8:0202:-", "printerId": "p1", "online": True},
             {"fingerprint": None, "printerId": "p2", "online": True},

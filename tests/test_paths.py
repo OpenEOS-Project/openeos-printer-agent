@@ -33,5 +33,5 @@ class TestPaths:
         assert Path(paths.resource_dir()).name == "src"
 
     def test_version(self):
-        assert __version__ == "0.2.6"
-        assert get_version() == "0.2.6"
+        assert __version__ == "0.3.0"
+        assert get_version() == "0.3.0"

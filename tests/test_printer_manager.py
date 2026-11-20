@@ -34,14 +34,7 @@ class TestBackends:
         assert "Testbon 42" in caplog.text
         assert printer.get_heartbeat_dict() == {"fingerprint": "usb:04b8:0202:-", "printerId": "p1", "online": True}
 
-    def test_network_backend(self, monkeypatch):
-        created = {}
-
-        def fake_network(host: str, port: int = 9100, **kwargs):
-            created.update(host=host, port=port)
-            return MagicMock()
-
-        monkeypatch.setattr(printer_manager, "Network", fake_network)
+    def test_network_backend(self):
         printer = ManagedPrinter(
             {
                 "id": "p2",
@@ -50,8 +43,11 @@ class TestBackends:
                 "connectionConfig": {"ipAddress": "10.0.0.5", "port": "9100"},
             }
         )
-        printer._create_escpos()
-        assert created == {"host": "10.0.0.5", "port": 9100}
+        buffer = printer._create_escpos()
+        # escpos only renders into a buffer; the transport sends per job
+        assert isinstance(buffer, printer_manager.Dummy)
+        assert printer.uses_transport
+        assert (printer._transport.host, printer._transport.port) == ("10.0.0.5", 9100)
 
     def test_network_requires_ip(self):
         printer = ManagedPrinter({"id": "p", "name": "x", "connectionType": "network", "connectionConfig": {}})
@@ -80,8 +76,7 @@ class TestBackends:
         assert calls == [(0x04B8, 0x0202, {"serial_number": "S1"}), (0x04B8, 0x0202, None)]
 
     def test_windows_backend(self, monkeypatch):
-        fake_win32raw = MagicMock()
-        monkeypatch.setattr(printer_manager, "Win32Raw", fake_win32raw)
+        monkeypatch.setattr(printer_manager, "win32print", MagicMock())
         printer = ManagedPrinter(
             {
                 "id": "p4",
@@ -90,11 +85,13 @@ class TestBackends:
                 "connectionConfig": {"windowsPrinterName": "EPSON TM-T20"},
             }
         )
-        printer._create_escpos()
-        fake_win32raw.assert_called_once_with("EPSON TM-T20")
+        buffer = printer._create_escpos()
+        # one spool document per job (not escpos' Win32Raw, which keeps one open)
+        assert isinstance(buffer, printer_manager.Dummy)
+        assert printer.uses_transport and printer._transport.name == "EPSON TM-T20"
 
     def test_windows_backend_without_pywin32(self, monkeypatch):
-        monkeypatch.setattr(printer_manager, "Win32Raw", None)
+        monkeypatch.setattr(printer_manager, "win32print", None)
         printer = ManagedPrinter(
             {"id": "p4", "name": "Bon", "connectionType": "windows", "connectionConfig": {"windowsPrinterName": "X"}}
         )

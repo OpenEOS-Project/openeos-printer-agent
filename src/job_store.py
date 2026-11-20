@@ -7,17 +7,24 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Finished jobs are remembered this long so a job the server delivers again
+# (it replays jobs still "printing" on its side after a reconnect) is not
+# printed twice - the agent only re-sends the outcome.
+KEEP_FINISHED_S = 24 * 3600
+
 
 class JobStore:
     """Crash-safe SQLite store for print jobs.
 
     Lifecycle of a row:
-      1. ``add()`` when a job arrives over the websocket — BEFORE the ack is
+      1. ``add()`` when a job arrives over the websocket - BEFORE the ack is
          sent, so an acked job can never be lost by a crash. Duplicate
          deliveries (server replay) are detected here by job_id.
-      2. ``mark_outcome()`` when the job finished but the outcome could not be
-         reported to the server (offline) — re-reported on reconnect.
-      3. ``remove()`` once the outcome has been reported successfully.
+      2. ``mark_outcome()`` as soon as the job finished (printed or finally
+         failed) - before reporting it, so a crash in between never prints
+         it again.
+      3. ``mark_reported()`` once the server acknowledged the outcome.
+      4. ``prune()`` drops reported rows after ``KEEP_FINISHED_S``.
     """
 
     def __init__(self, path: str) -> None:
@@ -37,6 +44,14 @@ class JobStore:
             )
             """
         )
+        # Columns added in 0.2.7; older stores are migrated in place.
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(jobs)")}
+        if "reported" not in columns:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN reported INTEGER NOT NULL DEFAULT 0")
+        if "finished_at" not in columns:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN finished_at REAL")
+        if "attempts" not in columns:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
         logger.info(f"Job store ready: {path}")
 
@@ -50,6 +65,14 @@ class JobStore:
         self._conn.commit()
         return cur.rowcount > 0
 
+    def get(self, job_id: str) -> Optional[dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT job_id, status, error_code, error_message, reported, finished_at, attempts "
+            "FROM jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def remove(self, job_id: str) -> None:
         self._conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
         self._conn.commit()
@@ -60,13 +83,29 @@ class JobStore:
         status: str,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        attempts: int = 0,
     ) -> None:
-        """Record a finished job whose outcome has not reached the server yet
-        (status: 'completed' or 'failed')."""
+        """Record a finished job (status: 'completed' or 'failed'); the
+        outcome still has to reach the server."""
         self._conn.execute(
-            "UPDATE jobs SET status = ?, error_code = ?, error_message = ? WHERE job_id = ?",
-            (status, error_code, error_message, job_id),
+            "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, finished_at = ?, reported = 0, "
+            "attempts = ? WHERE job_id = ?",
+            (status, error_code, error_message, time.time(), attempts, job_id),
         )
+        self._conn.commit()
+
+    def requeue(self, job_id: str, data: dict[str, Any]) -> None:
+        """A failed job delivered again (manual retry in the web app reuses
+        the job id): print it again."""
+        self._conn.execute(
+            "UPDATE jobs SET data = ?, status = 'pending', error_code = NULL, error_message = NULL, "
+            "finished_at = NULL, reported = 0, attempts = 0 WHERE job_id = ?",
+            (json.dumps(data), job_id),
+        )
+        self._conn.commit()
+
+    def mark_reported(self, job_id: str) -> None:
+        self._conn.execute("UPDATE jobs SET reported = 1 WHERE job_id = ?", (job_id,))
         self._conn.commit()
 
     def get_pending(self) -> list[dict[str, Any]]:
@@ -83,10 +122,22 @@ class JobStore:
     def get_unreported(self) -> list[dict[str, Any]]:
         """Finished jobs whose outcome still has to be reported to the server."""
         rows = self._conn.execute(
-            "SELECT job_id, status, error_code, error_message FROM jobs "
-            "WHERE status IN ('completed', 'failed') ORDER BY created_at ASC"
+            "SELECT job_id, status, error_code, error_message, attempts, finished_at FROM jobs "
+            "WHERE status IN ('completed', 'failed') AND reported = 0 ORDER BY created_at ASC"
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def prune(self, keep_s: float = KEEP_FINISHED_S, now: Optional[float] = None) -> int:
+        """Forget reported jobs older than ``keep_s``. Unreported outcomes are
+        kept for a week before giving up on them."""
+        now = time.time() if now is None else now
+        cur = self._conn.execute(
+            "DELETE FROM jobs WHERE status IN ('completed', 'failed') AND "
+            "((reported = 1 AND COALESCE(finished_at, created_at) < ?) OR COALESCE(finished_at, created_at) < ?)",
+            (now - keep_s, now - 7 * 24 * 3600),
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def close(self) -> None:
         self._conn.close()
