@@ -746,6 +746,9 @@ class Controller(QObject):
         QTimer.singleShot(1500, lambda: self._capture(timed_out and bool(wanted)))
 
     def _capture(self, timed_out: bool) -> None:
+        if self.args.capture_tab is not None:
+            self.window.tabs.setCurrentIndex(self.args.capture_tab)
+            QApplication.processEvents()
         target = Path(self.args.capture)
         target.parent.mkdir(parents=True, exist_ok=True)
         win = self.window
@@ -769,7 +772,8 @@ class Controller(QObject):
     def _finish_capture(self, pixmap: QPixmap, target: Path, timed_out: bool) -> None:
         pixmap.save(str(target))
         print(f"captured {target} (state={self._last_state}{', TIMEOUT' if timed_out else ''})", flush=True)
-        self.app.exit(2 if timed_out else 0)
+        code = 2 if timed_out else 0
+        QTimer.singleShot(int(self.args.capture_hold * 1000), lambda: self.app.exit(code))
 
     def quit(self) -> None:
         self.timer.stop()
@@ -792,6 +796,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--capture-timeout", type=float, default=60.0, help=argparse.SUPPRESS)
     p.add_argument("--capture-desktop", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--capture-tray-menu", action="store_true", help=argparse.SUPPRESS)
+    # keep the window/menu on screen this long after the capture (for an
+    # external screenshot of the whole desktop), and pick a tab first
+    p.add_argument("--capture-hold", type=float, default=0.0, help=argparse.SUPPRESS)
+    p.add_argument("--capture-tab", type=int, default=None, help=argparse.SUPPRESS)
     return p
 
 
