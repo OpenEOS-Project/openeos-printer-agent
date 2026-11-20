@@ -16,15 +16,39 @@ what is configured in the OpenEOS web app, not on the PC.
 - Crash-safe job queue (jobs survive restarts), per-printer retries
 - Jinja2 templates with per-organisation overrides from the platform
 - Local status page with pairing code and found printers: `http://localhost:8080`
+- Desktop window with tray icon (Windows, Linux desktops): pairing code, printers, queue, errors, test print, service control
+- Keeps Windows awake while connected; local JSON API `/api/ui/*` (this machine only)
 - Windows service, systemd unit, single-file binaries for Windows x64, Linux x64 and arm64
 
 ## Install
 
-### Windows (exe + service)
+### Windows (installer - recommended)
 
-1. Download `openeos-printer-agent-windows-x64.exe` from the
-   [latest release](https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest)
-   and put it somewhere permanent, e.g. `C:\Program Files\OpenEOS\`.
+Download `openeos-printer-agent-setup-windows-x64.exe` from the
+[latest release](https://github.com/OpenEOS-Project/openeos-printer-agent/releases/latest)
+and run it. It installs into `C:\Program Files\OpenEOS Printer Agent`:
+
+- the background service "OpenEOS Printer Agent" (starts with Windows, restarts
+  after crashes; logged-in users may start/stop it without admin rights),
+- the window **OpenEOS Drucker-Agent** with a tray icon: connection state,
+  the pairing code in large digits, printers with online state and queue,
+  recent errors, test print per printer, start/stop/restart of the service,
+  links to the web app, status page and log folder,
+- a Start menu entry, autostart of the window at login (tray only) and,
+  optionally, a desktop shortcut.
+
+Self-hosting? The installer asks for the server address (`https://<your-host>/api`).
+Silent install: `setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/SERVER=https://<host>/api] [/TASKS="autostart,desktopicon"]`.
+The uninstaller removes the service; pairing and settings in
+`%ProgramData%\OpenEOS Printer Agent` stay.
+
+The binaries are not code-signed yet: SmartScreen shows "Windows protected
+your PC" - click "More info" > "Run anyway".
+
+### Windows (plain exe + service)
+
+1. Download `openeos-printer-agent-windows-x64.exe` and put it somewhere
+   permanent, e.g. `C:\Program Files\OpenEOS\`.
 2. First look (optional): double-click the EXE or run
    ```
    openeos-printer-agent-windows-x64.exe
@@ -41,7 +65,8 @@ what is configured in the OpenEOS web app, not on the PC.
    "OpenEOS Printer Agent" starts automatically with Windows. The pairing
    code is in `%ProgramData%\OpenEOS Printer Agent\logs\agent.log` and on
    `http://localhost:8080`.
-4. Remove: `openeos-printer-agent-windows-x64.exe remove-service` (as Administrator).
+4. `start-service`, `stop-service`, `restart-service`; remove with
+   `remove-service` (as Administrator).
 
 Everything the agent stores lives in `%ProgramData%\OpenEOS Printer Agent`
 (`config.yaml`, `device.json` with the token, `print-jobs.db`, `logs\`).
@@ -70,6 +95,20 @@ logs: `/var/log/openeos-printer/agent.log` and `journalctl -u openeos-printer`.
 
 Raspberry Pi: use the **arm64** binary on a 64-bit Raspberry Pi OS (Pi 4/5).
 On 32-bit OS or Pi 3 use the source install (`install.sh` without `--binary`).
+
+**Desktop (laptop, Pi with desktop):** when a desktop is installed,
+`install.sh` also sets up the window and tray icon (menu entry
+"OpenEOS Drucker-Agent", autostart for every user), turns on
+`power.keep_awake` and adds a polkit rule so the service may hold a sleep
+inhibitor and logged-in users may restart it. Put
+`openeos-printer-agent-ui-linux-<arch>` next to the agent binary (or pass
+`--ui-binary FILE`); from the source checkout PySide6 is installed into the
+venv. `--no-ui` / `--ui` force either way. Headless machines are unchanged.
+
+Supported: the agent binary runs on Debian 11/12, Ubuntu 22.04+ and
+Raspberry Pi OS Bookworm (64-bit) - built on glibc 2.31. The window binary
+needs Ubuntu 22.04+, Debian 12+ or Raspberry Pi OS Bookworm with a desktop.
+Release builds: `packaging/linux/build-binaries.sh` (Docker).
 
 ### Linux binary, no service
 
@@ -100,6 +139,28 @@ docker run -d --name openeos-printer -p 8080:8080 --network host \
 ```
 
 `--network host` is needed for mDNS and the subnet scan; pass `--device` for USB printers.
+
+## Keeping the computer awake
+
+A laptop that goes to sleep stops printing. While the agent is connected to
+the server it asks the OS not to sleep (`power.keep_awake`, default **on
+for Windows**, off on Linux unless `install.sh` found a desktop):
+
+- **Windows:** `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`
+  from the service; visible in `powercfg /requests` (SYSTEM section). The
+  display may still turn off.
+- **Linux:** a logind sleep inhibitor (`systemd-inhibit --what=sleep
+  --mode=block`), best effort; needs the polkit rule `install.sh` adds for
+  the `openeos` user.
+
+Limits - this only stops *idle* sleep. Closing the lid (if the power
+options say "sleep"; logind ignores inhibitors for the lid by default),
+the power button, Start > Sleep, a flat battery and, on Modern Standby
+(S0ix) laptops, standby after the screen turns off still send the computer
+to sleep. For events: set "When I close the lid: Do nothing", keep the
+laptop plugged in, and disable power saving for the network adapter
+(Device Manager > adapter > Power Management). After waking up the agent
+reconnects right away and prints what is waiting.
 
 ## Pairing
 
