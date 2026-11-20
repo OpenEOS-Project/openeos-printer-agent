@@ -99,7 +99,8 @@ jobs:
           # Interactive Users may start/stop the service (window without UAC)
           $sd = (sc.exe sdshow OpenEOSPrinterAgent) -join ''
           $sd | Out-File out\service-sddl.txt
-          if ($sd -notmatch ';;;IU\)' -or $sd -notmatch '\(A;;[A-Z]*RP[A-Z]*;;;IU\)|\(A;;0x[0-9a-f]+;;;IU\)') { Write-Warning "SDDL: $sd" }
+          # an IU ACE with RP (start) and WP (stop)
+          if ($sd -notmatch '\(A;;[A-Z]*RP[A-Z]*WP[A-Z]*;;;IU\)') { throw "Interactive Users cannot start/stop the service: $sd" }
           Get-Content "$env:ProgramData\OpenEOS Printer Agent\config.yaml"
 
       - name: Testdrucker statt Hardware

@@ -196,6 +196,9 @@ def _set_failure_actions() -> None:
 INTERACTIVE_USERS_SID = "S-1-5-4"
 # SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | SERVICE_INTERROGATE
 USER_CONTROL_RIGHTS = 0x0004 | 0x0010 | 0x0020 | 0x0080
+# Standard rights (winnt.h) - not exported by win32security
+READ_CONTROL = 0x00020000
+WRITE_DAC = 0x00040000
 
 
 def allow_users_to_control(service_name: str = SERVICE_NAME) -> bool:
@@ -207,8 +210,7 @@ def allow_users_to_control(service_name: str = SERVICE_NAME) -> bool:
 
         hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
         try:
-            access = win32security.READ_CONTROL | win32security.WRITE_DAC  # type: ignore[attr-defined]
-            hs = win32service.OpenService(hscm, service_name, access)
+            hs = win32service.OpenService(hscm, service_name, READ_CONTROL | WRITE_DAC)
             try:
                 sd = win32service.QueryServiceObjectSecurity(hs, win32security.DACL_SECURITY_INFORMATION)
                 dacl = sd.GetSecurityDescriptorDacl()
