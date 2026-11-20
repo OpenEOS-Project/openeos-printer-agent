@@ -1,7 +1,7 @@
 """Windows print-spooler discovery via ``win32print.EnumPrinters``.
 
 Any locally installed printer queue becomes a ``windows`` candidate; the
-agent later prints to it raw through ``escpos.printer.Win32Raw``. Virtual
+agent later prints to it raw through the spooler (src/win_spooler.py). Virtual
 queues Windows ships by default (PDF, XPS, OneNote, Fax) are skipped - raw
 ESC/POS sent there only produces garbage documents.
 """
