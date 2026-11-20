@@ -31,6 +31,7 @@ if sys.platform.startswith("win"):
         "win32service",
         "win32serviceutil",
         "win32event",
+        "win32security",
         "servicemanager",
         "libusb_package",
     ]
@@ -44,7 +45,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "scipy", "pandas"],
+    excludes=["tkinter", "matplotlib", "numpy", "scipy", "pandas", "PySide6", "shiboken6"],
     cipher=block_cipher,
     noarchive=False,
 )
@@ -63,4 +64,5 @@ exe = EXE(
     upx=False,
     console=True,
     disable_windowed_traceback=False,
+    icon="packaging/icons/openeos-printer-agent.ico" if sys.platform.startswith("win") else None,
 )

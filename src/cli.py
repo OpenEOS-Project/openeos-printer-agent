@@ -5,6 +5,8 @@
     openeos-printer-agent status
     openeos-printer-agent install-service [--server-url URL]   (Windows)
     openeos-printer-agent remove-service                       (Windows)
+    openeos-printer-agent start-service|stop-service|restart-service
+                                                    (Windows service / systemd unit)
 
 Without a subcommand ``run`` is assumed, so the systemd unit's
 ``python -m src.main --config ...`` keeps working unchanged. Without any
@@ -65,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install-service", help="Install and start the Windows service (run as Administrator)")
     add_common(install)
     sub.add_parser("remove-service", help="Stop and remove the Windows service (run as Administrator)")
+    for action in ("start", "stop", "restart"):
+        sub.add_parser(
+            f"{action}-service",
+            help=f"{action.capitalize()} the background service (Windows service or systemd unit 'openeos-printer')",
+        )
     # Hidden: the Windows service control manager starts the executable with
     # this argument (see windows_service.install_service).
     sub.add_parser("service", help=argparse.SUPPRESS)
@@ -235,6 +242,28 @@ def cmd_remove_service(args: argparse.Namespace) -> int:
     return remove_service()
 
 
+def cmd_control_service(args: argparse.Namespace) -> int:
+    """start-service / stop-service / restart-service. The desktop window
+    runs this elevated (UAC) when the user may not control the service."""
+    from .service_control import NOT_INSTALLED, ServiceControlError, default_controller, run_action
+
+    action = args.command.split("-", 1)[0]
+    controller = default_controller()
+    if controller is None:
+        print("No service manager found (Windows service or systemd).", file=sys.stderr)
+        return 2
+    if controller.state() == NOT_INSTALLED:
+        print("The OpenEOS Printer Agent service is not installed.", file=sys.stderr)
+        return 2
+    try:
+        run_action(controller, action)
+    except ServiceControlError as e:
+        print(f"{action} failed: {e}", file=sys.stderr)
+        return 3 if e.permission_denied else 1
+    print(f"Service: {controller.state()}")
+    return 0
+
+
 def cmd_service(args: argparse.Namespace) -> int:
     if not is_windows():
         return _windows_only("service")
@@ -250,6 +279,9 @@ COMMANDS = {
     "install-service": cmd_install_service,
     "remove-service": cmd_remove_service,
     "service": cmd_service,
+    "start-service": cmd_control_service,
+    "stop-service": cmd_control_service,
+    "restart-service": cmd_control_service,
 }
 
 

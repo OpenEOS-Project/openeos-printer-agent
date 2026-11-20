@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field
@@ -53,6 +54,30 @@ class LocalServerConfig(BaseModel):
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
+    # The JSON API for the desktop window (``/api/ui/...``: state, test
+    # print) only answers requests from this machine, even though the status
+    # page itself is reachable from the LAN. Set to true only behind a
+    # trusted network - it allows test prints from other machines.
+    allow_remote_ui: bool = False
+
+
+class PowerConfig(BaseModel):
+    """Keep the computer awake while the agent is connected to the server.
+
+    ``keep_awake`` unset means: on for Windows (laptops at the bar going to
+    sleep is the most common "printer offline" cause), off elsewhere.
+    Windows: SetThreadExecutionState(ES_SYSTEM_REQUIRED), the display may
+    still turn off. Linux: a systemd/logind sleep inhibitor (best effort).
+    Neither stops sleep the user asks for (lid, power button, menu).
+    """
+
+    keep_awake: Optional[bool] = None
+
+    @property
+    def keep_awake_enabled(self) -> bool:
+        if self.keep_awake is None:
+            return sys.platform.startswith("win")
+        return self.keep_awake
 
 
 class DiscoveryConfig(BaseModel):
@@ -100,6 +125,10 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     local_server: LocalServerConfig = Field(default_factory=LocalServerConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    power: PowerConfig = Field(default_factory=PowerConfig)
+    # Address of the OpenEOS web app, for the "open web app" button of the
+    # desktop window. Unset: derived from server_url (api.X -> app.X).
+    web_app_url: Optional[str] = None
     # Data directory override (device token, job store, template cache).
     data_dir: Optional[str] = None
     # Explicit file overrides; both default to files inside ``data_dir``.
@@ -162,6 +191,18 @@ class AppConfig(BaseModel):
     @property
     def template_cache_path(self) -> Path:
         return self.data_path / "templates-cache"
+
+    @property
+    def resolved_web_app_url(self) -> str:
+        """``https://api.openeos.de/api`` -> ``https://app.openeos.de``;
+        a self-hosted ``https://kasse.example.org/api`` -> ``https://kasse.example.org``."""
+        if self.web_app_url:
+            return self.web_app_url.rstrip("/")
+        parts = urlsplit(self.server.url)
+        host = parts.netloc
+        if host.startswith("api."):
+            host = "app." + host[len("api.") :]
+        return f"{parts.scheme}://{host}"
 
     def describe_server_url(self) -> str:
         """One line for the log/console: which server, chosen how, and how

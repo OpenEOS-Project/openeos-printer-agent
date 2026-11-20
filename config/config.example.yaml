@@ -29,6 +29,17 @@ local_server:
   enabled: true            # status page + pairing code on http://<host>:8080
   host: "0.0.0.0"
   port: 8080
+  # /api/ui/* (desktop window: state, test print) answers this machine only
+  # allow_remote_ui: false
+
+# Keep the computer from sleeping while connected to the server.
+# Default: on for Windows, off elsewhere (install.sh turns it on for desktops).
+# power:
+#   keep_awake: true
+
+# Web app for the window's "open OpenEOS" button; default derived from
+# server_url (https://api.example.org/api -> https://app.example.org).
+# web_app_url: "https://app.openeos.de"
 
 discovery:
   interval_s: 300          # automatic scan every 5 minutes

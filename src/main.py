@@ -19,6 +19,7 @@ from .discovery import DiscoveryService
 from .job_queue import JobQueue
 from .job_store import JobStore
 from .local_server import LocalServer
+from .power import KeepAwake, keep_awake_from_config
 from .printer_manager import PrinterManager
 from .system_monitor import SystemMonitor
 from .template_engine import TemplateEngine
@@ -46,6 +47,9 @@ WAKE_CHECK_INTERVAL_S = 5.0
 WAKE_JUMP_S = 20.0
 WAKE_DEBOUNCE_S = 30.0
 
+# How often the keep-awake request is matched to the connection state.
+POWER_CHECK_INTERVAL_S = 5.0
+
 
 class PrinterAgent:
     """Main orchestrator for the OpenEOS Printer Agent."""
@@ -70,6 +74,8 @@ class PrinterAgent:
         self._wake_task: Optional[asyncio.Task[None]] = None
         self._reconnect_task: Optional[asyncio.Task[None]] = None
         self._last_resume = 0.0
+        self._power_task: Optional[asyncio.Task[None]] = None
+        self._keep_awake: Optional[KeepAwake] = None
 
         # Jobs the backend replays immediately on (re)connect can arrive before
         # the job queue + workers exist (connect happens several startup steps
@@ -108,11 +114,17 @@ class PrinterAgent:
         # 2. System Monitor
         self._system_monitor = SystemMonitor()
 
+        # 2b. Keep the machine awake while connected (Windows default, see
+        # src/power.py). Started now so the state is reported from the start.
+        self._keep_awake = keep_awake_from_config(config.power.keep_awake_enabled)
+        self._power_task = asyncio.create_task(self._power_loop(), name="keep-awake")
+
         # 3. Local HTTP Server (starts early to show the pairing code)
         if config.local_server.enabled:
             self._local_server = LocalServer(
                 config=config,
                 system_monitor=self._system_monitor,
+                keep_awake=self._keep_awake,
             )
             try:
                 await self._local_server.start()
@@ -317,6 +329,21 @@ class PrinterAgent:
         if self._discovery:
             self._discovery.start()
         logger.info(f"Connected again as device {device_id} (organization: {registrar.organization_name or '-'})")
+
+    async def _power_loop(self) -> None:
+        """Hold the sleep inhibitor exactly while the socket is up. Runs on
+        the event loop thread - SetThreadExecutionState is per thread."""
+        while True:
+            try:
+                if self._keep_awake is not None:
+                    connected = self._ws_client is not None and self._ws_client.is_connected
+                    self._keep_awake.update(connected)
+                await asyncio.sleep(POWER_CHECK_INTERVAL_S)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Keep-awake check failed: {e}")
+                await asyncio.sleep(POWER_CHECK_INTERVAL_S)
 
     async def _health_check_loop(self) -> None:
         """Every HEALTH_CHECK_INTERVAL_S: probe printers (a printer seen
@@ -543,7 +570,13 @@ class PrinterAgent:
         logger.info("Shutting down Printer Agent...")
 
         # 1. Stop health checks + discovery (+ a running token recovery)
-        for task in (self._health_check_task, self._recovery_task, self._wake_task, self._reconnect_task):
+        for task in (
+            self._health_check_task,
+            self._recovery_task,
+            self._wake_task,
+            self._reconnect_task,
+            self._power_task,
+        ):
             if task:
                 task.cancel()
                 try:
@@ -556,6 +589,8 @@ class PrinterAgent:
         # 2. Disconnect WebSocket
         if self._ws_client:
             await self._ws_client.disconnect()
+        if self._keep_awake is not None:
+            self._keep_awake.release()
 
         # 3. Stop job queue workers
         if self._job_queue:

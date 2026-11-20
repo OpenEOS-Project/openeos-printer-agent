@@ -53,6 +53,9 @@ class PrintJob:
         self.status: str = "queued"
         self.error: Optional[str] = None
         self.created_at: float = time.time()
+        # Local jobs (test print from the desktop window) never came from the
+        # server: no job store entry, no completion/failure report.
+        self.local: bool = bool(data.get("_local", False))
 
 
 class JobQueue:
@@ -76,6 +79,9 @@ class JobQueue:
         self._stats: dict[str, dict[str, int]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._report_tasks: set[asyncio.Task[None]] = set()
+        # Outcome of the most recent job per printer (desktop window: "last
+        # print 14:02 ok" / the error of a failed test print).
+        self._last_job: dict[str, dict[str, Any]] = {}
 
     def start_workers(self) -> None:
         """Start a worker task for each configured printer."""
@@ -108,6 +114,8 @@ class JobQueue:
         without printing twice.
         """
         job = PrintJob(job_data)
+        if job.local:
+            persist = False
 
         if persist and self._job_store:
             if not self._job_store.add(job.job_id, job_data):
@@ -119,12 +127,14 @@ class JobQueue:
 
         if queue is None:
             logger.warning(f"No queue for printer {job.printer_id}, job {job.job_id} rejected")
-            await self._report_failed(job.job_id, "PRINTER_NOT_FOUND", "Printer not configured on this agent")
+            if not job.local:
+                await self._report_failed(job.job_id, "PRINTER_NOT_FOUND", "Printer not configured on this agent")
             return False
 
         if queue.full():
             logger.warning(f"Queue full for printer {job.printer_id}, job {job.job_id} rejected")
-            await self._report_failed(job.job_id, "QUEUE_FULL", "Print queue is full")
+            if not job.local:
+                await self._report_failed(job.job_id, "QUEUE_FULL", "Print queue is full")
             return False
 
         await queue.put(job)
@@ -200,6 +210,14 @@ class JobQueue:
         if reported and self._job_store:
             self._job_store.mark_reported(job_id)
 
+    async def _report_job_complete(self, job: PrintJob) -> None:
+        if not job.local:
+            await self._report_complete(job.job_id, attempts=job.attempts)
+
+    async def _report_job_failed(self, job: PrintJob, error_code: str, error_message: str) -> None:
+        if not job.local:
+            await self._report_failed(job.job_id, error_code, error_message, attempts=job.attempts)
+
     async def _worker(self, printer_id: str) -> None:
         """Worker loop: process jobs from the queue for a specific printer."""
         queue = self._queues[printer_id]
@@ -224,7 +242,7 @@ class JobQueue:
                 # nobody notified a print job vanished.
                 logger.error(f"Worker error for printer {printer_id}, job {job.job_id}: {e}")
                 try:
-                    await self._report_failed(job.job_id, "WORKER_ERROR", str(e))
+                    await self._report_job_failed(job, "WORKER_ERROR", str(e))
                 except Exception as report_err:
                     logger.error(f"Also failed to report failure for job {job.job_id}: {report_err}")
             finally:
@@ -235,7 +253,7 @@ class JobQueue:
         printer = self._printer_manager.get_printer(printer_id)
         if printer is None:
             logger.error(f"Printer {printer_id} not found for job {job.job_id}")
-            await self._report_failed(job.job_id, "PRINTER_NOT_FOUND", "Printer not found")
+            await self._report_job_failed(job, "PRINTER_NOT_FOUND", "Printer not found")
             self._stats[printer_id]["failed"] += 1
             return
 
@@ -249,8 +267,9 @@ class JobQueue:
             job.status = "failed"
             job.error = str(e) or type(e).__name__
             self._stats[printer_id]["failed"] += 1
+            self._remember(printer_id, job)
             logger.error(f"Job {job.job_id} could not be rendered: {job.error}")
-            await self._report_failed(job.job_id, "TEMPLATE_ERROR", job.error)
+            await self._report_job_failed(job, "TEMPLATE_ERROR", job.error)
             return
 
         # A named function instead of a lambda here, because mypy cannot infer
@@ -274,10 +293,11 @@ class JobQueue:
                     job.status = "failed"
                     job.error = error_msg
                     self._stats[printer_id]["failed"] += 1
+                    self._remember(printer_id, job)
                     logger.error(
                         f"Job {job.job_id} failed after {job.attempts} attempts in {elapsed:.0f}s: {error_msg}"
                     )
-                    await self._report_failed(job.job_id, error_code, error_msg, attempts=job.attempts)
+                    await self._report_job_failed(job, error_code, error_msg)
                     return
                 delay = RETRY_DELAYS[min(job.attempts - 1, len(RETRY_DELAYS) - 1)]
                 logger.warning(
@@ -297,9 +317,19 @@ class JobQueue:
 
             job.status = "completed"
             self._stats[printer_id]["completed"] += 1
+            self._remember(printer_id, job)
             logger.info(f"Job {job.job_id} completed on printer '{printer.name}'")
-            await self._report_complete(job.job_id, attempts=job.attempts)
+            await self._report_job_complete(job)
             return
+
+    def _remember(self, printer_id: str, job: PrintJob) -> None:
+        self._last_job[printer_id] = {
+            "jobId": job.job_id,
+            "status": job.status,
+            "finishedAt": time.time(),
+            "error": job.error,
+            "local": job.local,
+        }
 
     def get_queue_stats(self) -> dict[str, Any]:
         """Get statistics for all printer queues."""
@@ -309,5 +339,6 @@ class JobQueue:
             result[printer_id] = {
                 **stats,
                 "pending": queue.qsize() if queue else 0,
+                "lastJob": self._last_job.get(printer_id),
             }
         return result
