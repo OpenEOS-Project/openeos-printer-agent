@@ -75,8 +75,11 @@ jobs:
       - name: Demo-Backend starten
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
-          Start-Process -FilePath python -ArgumentList "tools/demo_server.py","--port","8765","--host","127.0.0.1" `
-            -RedirectStandardOutput out\demo-server.log -RedirectStandardError out\demo-server.err -WindowStyle Hidden
+          # Started through WMI: the runner ends a step's whole process tree
+          # (Start-Process children included) when the step finishes.
+          $py = (Get-Command python).Source
+          $cmd = "cmd /c `"`"$py`" tools\demo_server.py --port 8765 --host 127.0.0.1 > out\demo-server.log 2> out\demo-server.err`""
+          Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; CurrentDirectory = (Get-Location).Path } | Out-Null
           for ($i = 0; $i -lt 30; $i++) {
             try { Invoke-RestMethod http://127.0.0.1:8765/_demo/state | Out-Null; break } catch { Start-Sleep 1 }
           }
