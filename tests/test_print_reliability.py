@@ -254,7 +254,11 @@ class TestQueueReliability:
         try:
             await q.enqueue(_job())
             await asyncio.sleep(0.2)
-            assert printer.status == PrinterStatus.OFFLINE
+            assert printer.status == PrinterStatus.OFFLINE  # also while still trying
+            for _ in range(100):  # first attempt done (Windows takes ~2 s to refuse)
+                if printer.last_error:
+                    break
+                await asyncio.sleep(0.05)
             fake_printer.restart()
             q.wake_retries("net-1")
             await asyncio.wait_for(q._queues["net-1"].join(), timeout=3)

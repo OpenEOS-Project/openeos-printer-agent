@@ -199,7 +199,10 @@ class ManagedPrinter:
             if self._escpos is None:
                 raise RuntimeError(f"Printer '{self.name}' is not connected")
 
-            self.status = PrinterStatus.BUSY
+            # Busy only counts as online when the printer was online before;
+            # a dead printer stays offline while we try to reach it.
+            if self.status == PrinterStatus.ONLINE:
+                self.status = PrinterStatus.BUSY
 
             loop = asyncio.get_running_loop()
             try:

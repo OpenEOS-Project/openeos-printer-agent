@@ -298,9 +298,9 @@ async def test_network_printer_off_during_job_prints_later_once(api: FakeApi, st
         tcp_printer.stop()  # switched off
         job = {"jobId": "job-off", "printerId": "net-1", "templateName": "_admin_test", "payload": {}}
         assert await api.send_job(job) == {"received": True}
-        await asyncio.sleep(0.6)
+        await api.wait_for(lambda: not managed.is_online)  # Windows: ~2 s to refuse
+        await asyncio.sleep(0.3)
         assert api.job_completes == [] and api.job_failures == []
-        assert not managed.is_online
 
         tcp_printer.restart()
         await api.wait_for(lambda: api.job_completes, timeout=10)
