@@ -40,13 +40,18 @@ AppSupportURL=https://docs.openeos.de
 AppUpdatesURL=https://github.com/OpenEOS-Project/openeos-printer-agent/releases
 DefaultDirName={autopf}\{#AppName}
 DisableProgramGroupPage=yes
-DisableDirPage=auto
+; One decision fewer for volunteers: always Program Files.
+DisableDirPage=yes
+; German Windows -> German setup without asking
+ShowLanguageDialog=auto
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\..\dist
 OutputBaseFilename=openeos-printer-agent-setup-windows-x64
 SetupIconFile=..\icons\openeos-printer-agent.ico
+WizardSmallImageFile=..\icons\wizard-small.bmp
+WizardImageFile=..\icons\wizard.bmp
 UninstallDisplayIcon={app}\ui\{#UiExe}
 UninstallDisplayName={#AppName}
 WizardStyle=modern
@@ -60,6 +65,24 @@ VersionInfoProductName={#AppName}
 [Languages]
 Name: "de"; MessagesFile: "compiler:Languages\German.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+; Inno's German texts address the user formally; OpenEOS says "du".
+de.SelectLanguageLabel=Wähle die Sprache für die Installation:
+de.SelectTasksLabel2=Wähle aus, was das Setup zusätzlich einrichten soll, und klicke dann auf "Weiter".
+de.ReadyLabel1=Das Setup ist bereit, [name] auf diesem Computer zu installieren.
+de.ReadyLabel2a=Klicke auf "Installieren", um zu beginnen, oder auf "Zurück", um etwas zu ändern.
+de.ReadyLabel2b=Klicke auf "Installieren", um zu beginnen.
+de.InstallingLabel=Einen Moment, [name] wird installiert.
+de.FinishedLabel=[name] ist installiert. Du findest ihn im Startmenü und unten rechts im Infobereich der Taskleiste.
+de.FinishedLabelNoIcons=[name] ist installiert.
+de.ClickFinish=Klicke auf "Fertigstellen", um das Setup zu beenden.
+de.ExitSetupMessage=Die Installation ist noch nicht fertig. Wenn du jetzt abbrichst, wird [name] nicht installiert. Du kannst das Setup später erneut starten.%n%nSetup beenden?
+de.ConfirmUninstall=Möchtest du [name] wirklich entfernen? Kopplung und Einstellungen bleiben erhalten.
+de.UninstalledAll=[name] wurde entfernt.
+de.UninstalledMost=[name] wurde entfernt. Einige Dateien konnten nicht gelöscht werden; du kannst sie selbst entfernen.
+de.SetupAppRunningError=[name] läuft gerade. Schließe es bitte und klicke dann auf OK.
+de.UninstallAppRunningError=[name] läuft gerade. Schließe es bitte und klicke dann auf OK.
 
 [CustomMessages]
 de.UiName=OpenEOS Drucker-Agent

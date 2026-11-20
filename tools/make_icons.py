@@ -4,7 +4,8 @@
     python tools/make_icons.py
 
 Writes packaging/icons/openeos-printer-agent.png (256 px, Linux desktop
-entry) and .ico (16-256 px, Windows exe, installer, shortcuts). The files
+entry), .ico (16-256 px, Windows exe, installer, shortcuts) and the
+installer's wizard-small.bmp / wizard.bmp. The files
 are committed; rerun only when the mark changes.
 """
 
@@ -38,6 +39,14 @@ def main() -> None:
     render(256).save(OUT / "openeos-printer-agent.png")
     sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
     render(256).save(OUT / "openeos-printer-agent.ico", sizes=[(s, s) for s in sizes])
+    # Inno Setup wizard images (24-bit BMP): top-right corner and the side
+    # panel of the first/last page, logo on the OpenEOS paper colour.
+    small = Image.new("RGB", (58, 58), "#ffffff")
+    small.paste(render(50), (4, 4), render(50))
+    small.save(OUT / "wizard-small.bmp")
+    side = Image.new("RGB", (164, 314), "#f5f2ea")
+    side.paste(render(96), (34, 109), render(96))
+    side.save(OUT / "wizard.bmp")
     print(f"Wrote icons to {OUT}")
 
 
