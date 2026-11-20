@@ -9,13 +9,11 @@ name: Windows-Installer und Oberflaeche
 #   -> verbunden -> Drucker uebernommen -> Testdruck -> Infobereich-Menue
 #   -> Dienst gestoppt -> Deinstallation entfernt den Dienst
 #
-# Dabei entstehen echte Bildschirmfotos (Fenster mit Rahmen und ganzer
-# Bildschirm) fuer die Anleitung, und powercfg /requests belegt, dass der
-# Dienst den Ruhezustand verhindert, solange er verbunden ist. Alles landet
-# als Artefakt "windows-gui".
-#
-# Damit Fenster und Fotos den gewohnten Servernamen zeigen, zeigt
-# api.openeos.de auf dem Runner per hosts-Datei auf das Demo-Backend.
+# Dabei entstehen Bildschirmfotos (Fenster mit Rahmen und ganzer Bildschirm)
+# zur Kontrolle, und powercfg /requests belegt, dass der Dienst den
+# Ruhezustand verhindert, solange er verbunden ist. Alles landet als
+# Artefakt "windows-gui". (Port 80 ist auf den Runnern belegt, das
+# Demo-Backend laeuft daher auf 127.0.0.1:8765.)
 on:
   workflow_dispatch:
   pull_request:
@@ -76,19 +74,18 @@ jobs:
 
       - name: Demo-Backend starten
         run: |
-          Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "`n127.0.0.1 api.openeos.de"
           New-Item -ItemType Directory -Force out | Out-Null
-          Start-Process -FilePath python -ArgumentList "tools/demo_server.py","--port","80","--host","127.0.0.1" `
+          Start-Process -FilePath python -ArgumentList "tools/demo_server.py","--port","8765","--host","127.0.0.1" `
             -RedirectStandardOutput out\demo-server.log -RedirectStandardError out\demo-server.err -WindowStyle Hidden
           for ($i = 0; $i -lt 30; $i++) {
-            try { Invoke-RestMethod http://api.openeos.de/_demo/state | Out-Null; break } catch { Start-Sleep 1 }
+            try { Invoke-RestMethod http://127.0.0.1:8765/_demo/state | Out-Null; break } catch { Start-Sleep 1 }
           }
-          Invoke-RestMethod http://api.openeos.de/_demo/state
+          Invoke-RestMethod http://127.0.0.1:8765/_demo/state
 
       - name: Still installieren
         run: |
           $p = Start-Process -FilePath dist\openeos-printer-agent-setup-windows-x64.exe -Wait -PassThru -ArgumentList `
-            '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SERVER=http://api.openeos.de/api','/TASKS="autostart,desktopicon"','/LOG=out\install.log'
+            '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SERVER=http://127.0.0.1:8765/api','/TASKS="autostart,desktopicon"','/LOG=out\install.log'
           if ($p.ExitCode -ne 0) { throw "Installer exit code $($p.ExitCode)" }
           $app = "${env:ProgramFiles}\OpenEOS Printer Agent"
           Get-ChildItem $app | Select-Object Name, Length
@@ -125,7 +122,7 @@ jobs:
 
       - name: Code eingeben, verbinden, Drucker uebernehmen
         run: |
-          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/verify?org=TSV%20Musterstadt"
+          Invoke-RestMethod -Method Post "http://127.0.0.1:8765/_demo/verify?org=TSV%20Musterstadt"
           for ($i = 0; $i -lt 60; $i++) {
             $s = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state
             if ($s.connection.connected) { break }; Start-Sleep 1
@@ -133,16 +130,16 @@ jobs:
           if (-not $s.connection.connected) { throw "not connected" }
           $ui = "${env:ProgramFiles}\OpenEOS Printer Agent\ui\openeos-printer-agent-ui.exe"
           Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\02-verbunden-ohne-drucker.png','--wait-state','no_printers'
-          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/printers?names=Theke,K%C3%BCche"
+          Invoke-RestMethod -Method Post "http://127.0.0.1:8765/_demo/printers?names=Theke,K%C3%BCche"
           for ($i = 0; $i -lt 60; $i++) {
             $s = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state
             if ($s.printers.Count -eq 2) { break }; Start-Sleep 1
           }
           # one job from the "server", one test print from the window API
-          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/job?printer=0"
+          Invoke-RestMethod -Method Post "http://127.0.0.1:8765/_demo/job?printer=0"
           Invoke-RestMethod -Method Post -Headers @{ 'X-OpenEOS-Agent-UI' = '1' } http://127.0.0.1:8080/api/ui/printers/printer-1/test-print
           Start-Sleep 3
-          Invoke-RestMethod http://api.openeos.de/_demo/state | ConvertTo-Json -Depth 5 | Out-File out\demo-state.json
+          Invoke-RestMethod http://127.0.0.1:8765/_demo/state | ConvertTo-Json -Depth 5 | Out-File out\demo-state.json
           Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\03-verbunden.png','--wait-state','connected','--capture-desktop'
           Start-Process $ui -Wait -ArgumentList '--lang','en','--capture','out\shots\en\03-connected.png','--wait-state','connected','--capture-desktop'
           Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\04-infobereich-menue.png','--wait-state','connected','--capture-tray-menu'
