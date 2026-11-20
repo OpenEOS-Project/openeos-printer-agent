@@ -90,7 +90,7 @@ jobs:
           $app = "${env:ProgramFiles}\OpenEOS Printer Agent"
           Get-ChildItem $app | Select-Object Name, Length
           if (-not (Test-Path "$app\ui\openeos-printer-agent-ui.exe")) { throw "UI missing" }
-          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS Drucker-Agent.lnk")) {
+          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS*.lnk")) {
             Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
             throw "Autostart shortcut missing"
           }
@@ -172,7 +172,7 @@ jobs:
           $p = Start-Process "${env:ProgramFiles}\OpenEOS Printer Agent\unins000.exe" -Wait -PassThru -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
           Start-Sleep 3
           if (Get-Service OpenEOSPrinterAgent -ErrorAction SilentlyContinue) { throw "service still installed" }
-          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS Drucker-Agent.lnk") { throw "autostart left behind" }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS*.lnk") { throw "autostart left behind" }
           "Uninstalled; data kept:"; Get-ChildItem "$env:ProgramData\OpenEOS Printer Agent"
 
       - name: Protokolle einsammeln
