@@ -244,6 +244,8 @@ def _job(job_id="job-1", printer_id="net-1"):
 class TestQueueReliability:
     async def test_printer_off_then_on_prints_without_failure(self, fake_printer, fast_retries, tmp_path):
         # (b) powered off: the job waits and prints once the printer is back
+        # Windows needs ~2 s per refused attempt; the window must outlast it
+        jq_module.RETRY_WINDOW_S = 30.0  # restored by monkeypatch (fast_retries)
         port = fake_printer.port
         fake_printer.stop()
         printer = _network_printer(port)
