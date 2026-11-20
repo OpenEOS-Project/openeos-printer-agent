@@ -1,0 +1,193 @@
+name: Windows-Installer und Oberflaeche
+
+# Baut Dienst-EXE, Fenster (PySide6) und den Inno-Setup-Installer, installiert
+# ihn still auf einem frischen Windows-Runner und spielt den Ablauf eines
+# Vereins einmal echt durch - gegen das Demo-Backend (tools/demo_server.py),
+# nicht gegen einen echten Server:
+#
+#   Installer -> Dienst laeuft -> Fenster zeigt Code -> "Code eingegeben"
+#   -> verbunden -> Drucker uebernommen -> Testdruck -> Infobereich-Menue
+#   -> Dienst gestoppt -> Deinstallation entfernt den Dienst
+#
+# Dabei entstehen echte Bildschirmfotos (Fenster mit Rahmen und ganzer
+# Bildschirm) fuer die Anleitung, und powercfg /requests belegt, dass der
+# Dienst den Ruhezustand verhindert, solange er verbunden ist. Alles landet
+# als Artefakt "windows-gui".
+#
+# Damit Fenster und Fotos den gewohnten Servernamen zeigen, zeigt
+# api.openeos.de auf dem Runner per hosts-Datei auf das Demo-Backend.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'packaging/**'
+      - 'tools/demo_server.py'
+      - 'tests/fake_api.py'
+      - 'openeos-printer-agent*.spec'
+      - 'pyinstaller*_entry.py'
+      - 'requirements*.txt'
+      - '.github/workflows/windows-gui.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Installer, Dienst und Fenster (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Python einrichten
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-windows.txt -r requirements-build.txt -r requirements-ui.txt
+          pip install --no-deps .
+
+      - name: Dienst-EXE und Fenster bauen
+        run: |
+          pyinstaller --clean --noconfirm openeos-printer-agent.spec
+          pyinstaller --clean --noconfirm openeos-printer-agent-ui.spec
+          dist\openeos-printer-agent.exe --version
+          Get-ChildItem dist
+
+      - name: Installer bauen (Inno Setup)
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          $version = (python -c "from src.version import get_version; print(get_version())").Trim()
+          & $iscc /Qp "/DAppVersion=$version" packaging\windows\openeos-printer-agent.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-Item dist\openeos-printer-agent-setup-windows-x64.exe
+
+      - name: Demo-Backend starten
+        run: |
+          Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "`n127.0.0.1 api.openeos.de"
+          New-Item -ItemType Directory -Force out | Out-Null
+          Start-Process -FilePath python -ArgumentList "tools/demo_server.py","--port","80","--host","127.0.0.1" `
+            -RedirectStandardOutput out\demo-server.log -RedirectStandardError out\demo-server.err -WindowStyle Hidden
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-RestMethod http://api.openeos.de/_demo/state | Out-Null; break } catch { Start-Sleep 1 }
+          }
+          Invoke-RestMethod http://api.openeos.de/_demo/state
+
+      - name: Still installieren
+        run: |
+          $p = Start-Process -FilePath dist\openeos-printer-agent-setup-windows-x64.exe -Wait -PassThru -ArgumentList `
+            '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SERVER=http://api.openeos.de/api','/TASKS="autostart,desktopicon"','/LOG=out\install.log'
+          if ($p.ExitCode -ne 0) { throw "Installer exit code $($p.ExitCode)" }
+          $app = "${env:ProgramFiles}\OpenEOS Printer Agent"
+          Get-ChildItem $app | Select-Object Name, Length
+          if (-not (Test-Path "$app\ui\openeos-printer-agent-ui.exe")) { throw "UI missing" }
+          if (-not (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS Drucker-Agent.lnk")) {
+            Get-ChildItem "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
+            throw "Autostart shortcut missing"
+          }
+          Get-Service OpenEOSPrinterAgent | Format-List Name, Status, StartType
+          if ((Get-Service OpenEOSPrinterAgent).Status -ne 'Running') { throw "Service not running" }
+          # Interactive Users may start/stop the service (window without UAC)
+          $sd = (sc.exe sdshow OpenEOSPrinterAgent) -join ''
+          $sd | Out-File out\service-sddl.txt
+          if ($sd -notmatch ';;;IU\)' -or $sd -notmatch '\(A;;[A-Z]*RP[A-Z]*;;;IU\)|\(A;;0x[0-9a-f]+;;;IU\)') { Write-Warning "SDDL: $sd" }
+          Get-Content "$env:ProgramData\OpenEOS Printer Agent\config.yaml"
+
+      - name: Testdrucker statt Hardware
+        run: |
+          # Kein echter Bondrucker auf dem Runner: Ausgabe ins Protokoll.
+          Add-Content "$env:ProgramData\OpenEOS Printer Agent\config.yaml" "dummy_printer: true"
+          Restart-Service OpenEOSPrinterAgent
+          for ($i = 0; $i -lt 60; $i++) {
+            try { $s = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state; if ($s.pairing.code) { break } } catch {}
+            Start-Sleep 1
+          }
+          $s.pairing | Format-List
+
+      - name: Fenster - Code (de)
+        run: |
+          $ui = "${env:ProgramFiles}\OpenEOS Printer Agent\ui\openeos-printer-agent-ui.exe"
+          $p = Start-Process $ui -Wait -PassThru -ArgumentList '--lang','de','--capture','out\shots\de\01-code.png','--wait-state','needs_pairing','--capture-desktop'
+          $p = Start-Process $ui -Wait -PassThru -ArgumentList '--lang','en','--capture','out\shots\en\01-code.png','--wait-state','needs_pairing','--capture-desktop'
+          Get-ChildItem out\shots -Recurse
+
+      - name: Code eingeben, verbinden, Drucker uebernehmen
+        run: |
+          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/verify?org=TSV%20Musterstadt"
+          for ($i = 0; $i -lt 60; $i++) {
+            $s = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state
+            if ($s.connection.connected) { break }; Start-Sleep 1
+          }
+          if (-not $s.connection.connected) { throw "not connected" }
+          $ui = "${env:ProgramFiles}\OpenEOS Printer Agent\ui\openeos-printer-agent-ui.exe"
+          Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\02-verbunden-ohne-drucker.png','--wait-state','no_printers'
+          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/printers?names=Theke,K%C3%BCche"
+          for ($i = 0; $i -lt 60; $i++) {
+            $s = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state
+            if ($s.printers.Count -eq 2) { break }; Start-Sleep 1
+          }
+          # one job from the "server", one test print from the window API
+          Invoke-RestMethod -Method Post "http://api.openeos.de/_demo/job?printer=0"
+          Invoke-RestMethod -Method Post -Headers @{ 'X-OpenEOS-Agent-UI' = '1' } http://127.0.0.1:8080/api/ui/printers/printer-1/test-print
+          Start-Sleep 3
+          Invoke-RestMethod http://api.openeos.de/_demo/state | ConvertTo-Json -Depth 5 | Out-File out\demo-state.json
+          Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\03-verbunden.png','--wait-state','connected','--capture-desktop'
+          Start-Process $ui -Wait -ArgumentList '--lang','en','--capture','out\shots\en\03-connected.png','--wait-state','connected','--capture-desktop'
+          Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\04-infobereich-menue.png','--wait-state','connected','--capture-tray-menu'
+          Start-Process $ui -Wait -ArgumentList '--lang','en','--capture','out\shots\en\04-tray-menu.png','--wait-state','connected','--capture-tray-menu'
+
+      - name: Ruhezustand wird verhindert (powercfg)
+        run: |
+          Start-Sleep 6
+          $state = Invoke-RestMethod http://127.0.0.1:8080/api/ui/state
+          $state.power | Format-List
+          powercfg /requests | Tee-Object out\powercfg-requests.txt
+          if (-not $state.power.active) { throw "keep-awake not active while connected" }
+          if (-not ((Get-Content out\powercfg-requests.txt -Raw) -match 'openeos-printer-agent')) {
+            throw "powercfg /requests does not list the agent"
+          }
+
+      - name: Dienst gestoppt
+        run: |
+          $app = "${env:ProgramFiles}\OpenEOS Printer Agent"
+          & "$app\openeos-printer-agent.exe" stop-service
+          $ui = "$app\ui\openeos-printer-agent-ui.exe"
+          Start-Process $ui -Wait -ArgumentList '--lang','de','--capture','out\shots\de\05-dienst-gestoppt.png','--wait-state','service_stopped'
+          Start-Process $ui -Wait -ArgumentList '--lang','en','--capture','out\shots\en\05-service-stopped.png','--wait-state','service_stopped'
+          & "$app\openeos-printer-agent.exe" start-service
+          if ((Get-Service OpenEOSPrinterAgent).Status -ne 'Running') { throw "start-service failed" }
+
+      - name: Deinstallieren
+        run: |
+          $p = Start-Process "${env:ProgramFiles}\OpenEOS Printer Agent\unins000.exe" -Wait -PassThru -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          Start-Sleep 3
+          if (Get-Service OpenEOSPrinterAgent -ErrorAction SilentlyContinue) { throw "service still installed" }
+          if (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\OpenEOS Drucker-Agent.lnk") { throw "autostart left behind" }
+          "Uninstalled; data kept:"; Get-ChildItem "$env:ProgramData\OpenEOS Printer Agent"
+
+      - name: Protokolle einsammeln
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item "$env:ProgramData\OpenEOS Printer Agent\logs\agent.log" out\ -ErrorAction SilentlyContinue
+
+      - name: Artefakt hochladen
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-gui
+          path: |
+            out/
+            dist/openeos-printer-agent-setup-windows-x64.exe
