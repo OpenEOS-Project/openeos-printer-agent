@@ -1,0 +1,11 @@
+# Desktop window + tray icon (src/ui, binary openeos-printer-agent-ui).
+# Not needed for the background service / headless installs.
+#
+# Pinned per platform because of glibc: the Linux binaries are built on
+# Debian 11 (glibc 2.31) so they run on Debian 11/12, Ubuntu 22.04 and
+# Raspberry Pi OS Bookworm. PySide6 >= 6.10 needs glibc 2.34 on x86_64,
+# >= 6.8.1 needs glibc 2.39 on aarch64 (manylinux tags on PyPI).
+PySide6-Essentials>=6.9,<7; sys_platform == "win32"
+PySide6-Essentials>=6.9.3,<6.10; sys_platform == "linux" and platform_machine == "x86_64"
+PySide6-Essentials>=6.8.0.2,<6.8.1; sys_platform == "linux" and platform_machine == "aarch64"
+PySide6-Essentials>=6.9,<7; sys_platform == "darwin"

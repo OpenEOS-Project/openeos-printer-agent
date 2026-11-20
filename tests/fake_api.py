@@ -23,6 +23,8 @@ class FakeApi:
 
     def __init__(self, reject_mode: str = "kick") -> None:
         self.reject_mode = reject_mode
+        # The real backend hands out 8 digits; tests are fine with 6.
+        self.code_digits = 6
         self.devices: dict[str, dict[str, Any]] = {}  # token -> device row
         self.status_changes: list[dict[str, Any]] = []  # deviceStatusChanged emitted
         self.discovered_reports: list[dict[str, Any]] = []  # every POST body
@@ -185,7 +187,7 @@ class FakeApi:
         device = {
             "deviceId": "dev-" + secrets.token_hex(4),
             "deviceToken": token,
-            "verificationCode": f"{secrets.randbelow(900000) + 100000}",
+            "verificationCode": str(secrets.randbelow(9 * 10 ** (self.code_digits - 1)) + 10 ** (self.code_digits - 1)),
             "status": "pending",
             "isActive": True,
             "organizationId": None,
