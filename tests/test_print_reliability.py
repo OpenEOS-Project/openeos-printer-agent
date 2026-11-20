@@ -266,7 +266,10 @@ class TestQueueReliability:
             await asyncio.wait_for(q._queues["net-1"].join(), timeout=3)
         finally:
             await q.stop_workers()
-        complete.assert_awaited_once_with("job-1")
+        complete.assert_awaited_once()
+        assert complete.call_args.args == ("job-1",)
+        assert complete.call_args.kwargs["attempts"] > 1  # real print attempts for the server
+        assert complete.call_args.kwargs["printed_at"] > 0
         failed.assert_not_awaited()
         assert any(b"TEST-DRUCK" in t for t in fake_printer.tickets)
 
@@ -338,6 +341,32 @@ class TestQueueReliability:
         assert store.get("job-1")["reported"] == 1
         store.close()
 
+    async def test_redelivered_failed_job_is_printed_again(self, fake_printer, fast_retries, tmp_path):
+        # Manual retry in the web app re-sends a failed job with the same id.
+        store = JobStore(str(tmp_path / "jobs.db"))
+        failed = AsyncMock(return_value=True)
+        complete = AsyncMock(return_value=True)
+        printer = _network_printer(fake_printer.port)
+        await printer.probe()  # like connect(): status support known -> checked before sending
+        fake_printer.paper_sensor = 0x72  # paper out -> job fails after the window
+        q = _queue(printer, store=store, complete=complete, failed=failed, tmp_path=tmp_path)
+        q.start_workers()
+        try:
+            await q.enqueue(_job())
+            await asyncio.wait_for(q._queues["net-1"].join(), timeout=5)
+            assert failed.call_args.args[1] == "PAPER_OUT"
+            assert store.get("job-1")["status"] == "failed"
+
+            fake_printer.paper_sensor = 0x12  # refilled
+            assert await q.enqueue(_job()) is True
+            await asyncio.wait_for(q._queues["net-1"].join(), timeout=5)
+        finally:
+            await q.stop_workers()
+        complete.assert_awaited_once()
+        assert store.get("job-1")["status"] == "completed"
+        assert len(fake_printer.tickets) == 1
+        store.close()
+
     async def test_crash_after_print_before_report_does_not_reprint(self, fake_printer, tmp_path):
         store = JobStore(str(tmp_path / "jobs.db"))
         q = _queue(
@@ -363,9 +392,8 @@ class TestJobStore:
         assert store.add("a", {"jobId": "a"})
         assert not store.add("a", {"jobId": "a"})
         store.mark_outcome("a", "completed")
-        assert store.get_unreported() == [
-            {"job_id": "a", "status": "completed", "error_code": None, "error_message": None}
-        ]
+        [row] = store.get_unreported()
+        assert (row["job_id"], row["status"], row["error_code"]) == ("a", "completed", None)
         store.mark_reported("a")
         assert store.get_unreported() == []
         assert not store.add("a", {"jobId": "a"})  # still known: no duplicate print
@@ -414,6 +442,7 @@ class TestReportAck:
             ({"success": True}, True),
             ({"error": "Job not found"}, True),
             ({"error": "Failed to update job status"}, False),
+            ({"error": "Not a device connection"}, False),
             (None, True),
         ],
     )
@@ -424,6 +453,24 @@ class TestReportAck:
         assert event == "printerJobComplete"
         assert payload == {"jobId": "j", "agentId": "d"}
         assert ws._sio.call.call_args.kwargs["timeout"] > 0
+
+    async def test_report_fields(self, ws):
+        ws._sio.call = AsyncMock(return_value={"success": True})
+        await ws.report_job_complete("j", attempts=3, printed_at=1_800_000_000.25)
+        payload = ws._sio.call.call_args.args[1]
+        assert payload == {"jobId": "j", "agentId": "d", "attempts": 3, "printedAt": "2027-01-15T08:00:00.250Z"}
+        await ws.report_job_failed("j", "PAPER_OUT", "x", attempts=2)
+        assert ws._sio.call.call_args.args[1]["attempts"] == 2
+
+    async def test_old_style_report_has_no_extra_fields(self, ws):
+        ws._sio.call = AsyncMock(return_value={"success": True})
+        await ws.report_job_complete("j")
+        assert ws._sio.call.call_args.args[1] == {"jobId": "j", "agentId": "d"}
+
+    async def test_handshake_announces_capability(self, ws):
+        ws._sio.connect = AsyncMock()
+        await ws.connect()
+        assert ws._sio.connect.call_args.kwargs["auth"]["capabilities"] == {"idempotentJobs": True}
 
     async def test_no_ack_keeps_outcome(self, ws):
         ws._sio.call = AsyncMock(side_effect=TimeoutError())

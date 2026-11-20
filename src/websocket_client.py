@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import socketio
@@ -28,7 +29,12 @@ SERVER_DISCONNECT_RETRY_S = 2.0
 # gateway answers {"success": true} or {"error": ...}.
 REPORT_ACK_TIMEOUT_S = 10.0
 # Errors where sending the same report again cannot help.
-FINAL_ACK_ERRORS = frozenset({"Job not found", "Not a device connection"})
+# "Job not found": the job was deleted on the server - resending cannot help.
+FINAL_ACK_ERRORS = frozenset({"Job not found"})
+# Announced in agentHeartbeat and the handshake: this agent dedupes printerJob
+# by jobId (~24 h) and resends outcomes until acknowledged, so the server may
+# re-send jobs that stay "printing" without an outcome.
+PROTOCOL_CAPABILITIES = {"idempotentJobs": True}
 SERVER_DISCONNECT = socketio.AsyncClient.reason.SERVER_DISCONNECT
 
 
@@ -212,7 +218,7 @@ class WebSocketClient:
 
         await self._sio.connect(
             url,
-            auth={"deviceToken": self._device_token},
+            auth={"deviceToken": self._device_token, "capabilities": dict(PROTOCOL_CAPABILITIES)},
             transports=["websocket"],
             wait_timeout=10,
         )
@@ -345,7 +351,7 @@ class WebSocketClient:
             "arch": identity["arch"],
             "hostname": identity["hostname"],
             "pythonVersion": identity["pythonVersion"],
-            "capabilities": self._capabilities() if self._capabilities else {},
+            "capabilities": {**(self._capabilities() if self._capabilities else {}), **PROTOCOL_CAPABILITIES},
             "printers": self._printer_manager.get_heartbeat_entries() if self._printer_manager else [],
         }
         return payload
@@ -391,25 +397,34 @@ class WebSocketClient:
         logger.debug(f"{event} for job {job_id} acknowledged: {ack}")
         return True
 
-    async def report_job_complete(self, job_id: str) -> bool:
+    async def report_job_complete(
+        self, job_id: str, attempts: Optional[int] = None, printed_at: Optional[float] = None
+    ) -> bool:
         """Report successful job completion to server.
 
         Returns True when the server acknowledged the report; False lets the
         caller keep the outcome in the job store for redelivery.
         """
-        return await self._report("printerJobComplete", {"jobId": job_id, "agentId": self._device_id})
+        payload: dict[str, Any] = {"jobId": job_id, "agentId": self._device_id}
+        if attempts:
+            payload["attempts"] = attempts
+        if printed_at:
+            payload["printedAt"] = _iso_utc(printed_at)
+        return await self._report("printerJobComplete", payload)
 
-    async def report_job_failed(self, job_id: str, error_code: str, error_message: str) -> bool:
+    async def report_job_failed(
+        self, job_id: str, error_code: str, error_message: str, attempts: Optional[int] = None
+    ) -> bool:
         """Report job failure to server. Returns True when acknowledged."""
-        return await self._report(
-            "printerJobFailed",
-            {
-                "jobId": job_id,
-                "agentId": self._device_id,
-                "errorCode": error_code,
-                "errorMessage": error_message,
-            },
-        )
+        payload: dict[str, Any] = {
+            "jobId": job_id,
+            "agentId": self._device_id,
+            "errorCode": error_code,
+            "errorMessage": error_message,
+        }
+        if attempts:
+            payload["attempts"] = attempts
+        return await self._report("printerJobFailed", payload)
 
     async def force_reconnect(self) -> None:
         """Drop the socket and connect again right away (after the computer
@@ -429,3 +444,7 @@ class WebSocketClient:
                 logger.warning(f"Reconnect after wake-up failed ({e}); next attempt in {delay:.0f}s")
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self._config.server.reconnect_max_interval)
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")

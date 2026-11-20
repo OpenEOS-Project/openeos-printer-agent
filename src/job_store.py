@@ -50,6 +50,8 @@ class JobStore:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN reported INTEGER NOT NULL DEFAULT 0")
         if "finished_at" not in columns:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN finished_at REAL")
+        if "attempts" not in columns:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
         logger.info(f"Job store ready: {path}")
 
@@ -65,7 +67,8 @@ class JobStore:
 
     def get(self, job_id: str) -> Optional[dict[str, Any]]:
         row = self._conn.execute(
-            "SELECT job_id, status, error_code, error_message, reported, finished_at FROM jobs WHERE job_id = ?",
+            "SELECT job_id, status, error_code, error_message, reported, finished_at, attempts "
+            "FROM jobs WHERE job_id = ?",
             (job_id,),
         ).fetchone()
         return dict(row) if row else None
@@ -80,13 +83,24 @@ class JobStore:
         status: str,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        attempts: int = 0,
     ) -> None:
         """Record a finished job (status: 'completed' or 'failed'); the
         outcome still has to reach the server."""
         self._conn.execute(
-            "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, finished_at = ?, reported = 0 "
-            "WHERE job_id = ?",
-            (status, error_code, error_message, time.time(), job_id),
+            "UPDATE jobs SET status = ?, error_code = ?, error_message = ?, finished_at = ?, reported = 0, "
+            "attempts = ? WHERE job_id = ?",
+            (status, error_code, error_message, time.time(), attempts, job_id),
+        )
+        self._conn.commit()
+
+    def requeue(self, job_id: str, data: dict[str, Any]) -> None:
+        """A failed job delivered again (manual retry in the web app reuses
+        the job id): print it again."""
+        self._conn.execute(
+            "UPDATE jobs SET data = ?, status = 'pending', error_code = NULL, error_message = NULL, "
+            "finished_at = NULL, reported = 0, attempts = 0 WHERE job_id = ?",
+            (json.dumps(data), job_id),
         )
         self._conn.commit()
 
@@ -108,7 +122,7 @@ class JobStore:
     def get_unreported(self) -> list[dict[str, Any]]:
         """Finished jobs whose outcome still has to be reported to the server."""
         rows = self._conn.execute(
-            "SELECT job_id, status, error_code, error_message FROM jobs "
+            "SELECT job_id, status, error_code, error_message, attempts, finished_at FROM jobs "
             "WHERE status IN ('completed', 'failed') AND reported = 0 ORDER BY created_at ASC"
         ).fetchall()
         return [dict(row) for row in rows]

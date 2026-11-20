@@ -145,7 +145,7 @@ async def test_full_flow(api: FakeApi, stub_scanners, tmp_path, caplog, monkeypa
         hb = api.heartbeats[0]
         assert set(hb) == {"version", "os", "arch", "hostname", "pythonVersion", "capabilities", "printers"}
         assert hb["version"] == "0.2.6"
-        assert set(hb["capabilities"]) == {"usb", "mdns", "portscan", "spooler"}
+        assert set(hb["capabilities"]) == {"usb", "mdns", "portscan", "spooler", "idempotentJobs"}
 
         # 4. Adopt in the "web app" -> printerConfigUpdate -> agent fetches it
         api.adopt(USB_FINGERPRINT, "printer-1", name="Kassenbon")
@@ -249,7 +249,7 @@ async def test_restart_reuses_token_and_replays_pending_job(api: FakeApi, stub_s
         await asyncio.wait_for(task2, 15)
 
 
-async def _never_delivered(job_id: str) -> bool:
+async def _never_delivered(job_id: str, **kwargs: object) -> bool:
     return False
 
 

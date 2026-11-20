@@ -426,13 +426,17 @@ class PrinterAgent:
             return
         for row in self._job_store.get_unreported():
             job_id = row["job_id"]
+            attempts = int(row.get("attempts") or 0) or None
             if row["status"] == "completed":
-                reported = await self._ws_client.report_job_complete(job_id)
+                reported = await self._ws_client.report_job_complete(
+                    job_id, attempts=attempts, printed_at=row.get("finished_at")
+                )
             else:
                 reported = await self._ws_client.report_job_failed(
                     job_id,
                     row.get("error_code") or "UNKNOWN",
                     row.get("error_message") or "Unknown error",
+                    attempts=attempts,
                 )
             if reported:
                 self._job_store.mark_reported(job_id)

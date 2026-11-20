@@ -111,8 +111,9 @@ class JobQueue:
 
         if persist and self._job_store:
             if not self._job_store.add(job.job_id, job_data):
-                self._handle_duplicate(job.job_id)
-                return True
+                if not self._handle_duplicate(job.job_id, job_data):
+                    return True
+                # failed before: fall through and print it again
 
         queue = self._queues.get(job.printer_id)
 
@@ -141,23 +142,33 @@ class JobQueue:
         if jobs:
             logger.info(f"Restored {len(jobs)} persisted print job(s)")
 
-    def _handle_duplicate(self, job_id: str) -> None:
-        """The server delivered a job we already have. Still pending: it is in
-        the queue, nothing to do. Finished: never print again - send the
-        outcome once more, the server evidently did not get it."""
+    def _handle_duplicate(self, job_id: str, job_data: dict[str, Any]) -> bool:
+        """The server delivered a job we already have. Returns True when it
+        has to be printed (again).
+
+        * still pending: it is in the queue - nothing to do;
+        * completed: never print twice - send the completion once more, the
+          server evidently did not get it;
+        * failed: print again. The server re-sends a failed job only on a
+          manual retry in the web app, which reuses the job id.
+        """
         assert self._job_store is not None
         row = self._job_store.get(job_id)
         if row is None or row["status"] == "pending":
             logger.info(f"Job {job_id} already queued - duplicate delivery ignored")
-            return
-        logger.info(f"Job {job_id} was already {row['status']} - not printing again, re-sending the outcome")
-        if row["status"] == "completed":
-            coro = self._report_complete(job_id)
-        else:
-            coro = self._report_failed(job_id, row.get("error_code") or "UNKNOWN", row.get("error_message") or "")
-        task = asyncio.create_task(coro, name=f"re-report-{job_id}")
+            return False
+        if row["status"] == "failed":
+            logger.info(f"Job {job_id} failed before and was sent again (retry) - printing it again")
+            self._job_store.requeue(job_id, job_data)
+            return True
+        logger.info(f"Job {job_id} was already printed - not printing again, re-sending the completion")
+        task = asyncio.create_task(
+            self._send_complete(job_id, int(row.get("attempts") or 0), row.get("finished_at")),
+            name=f"re-report-{job_id}",
+        )
         self._report_tasks.add(task)
         task.add_done_callback(self._report_tasks.discard)
+        return False
 
     def wake_retries(self, printer_id: Optional[str] = None) -> None:
         """End the pause of jobs waiting for a retry (printer back online,
@@ -166,23 +177,26 @@ class JobQueue:
             if printer_id is None or pid == printer_id:
                 event.set()
 
-    async def _report_complete(self, job_id: str) -> None:
+    async def _report_complete(self, job_id: str, attempts: int = 1) -> None:
         """Persist the outcome, then report it. The row stays (for duplicate
         detection) and is marked reported only after the server's ack."""
         if self._job_store:
-            self._job_store.mark_outcome(job_id, "completed")
+            self._job_store.mark_outcome(job_id, "completed", attempts=attempts)
+        await self._send_complete(job_id, attempts, time.time())
+
+    async def _send_complete(self, job_id: str, attempts: int, printed_at: Optional[float]) -> None:
         reported = False
         if self._on_job_complete:
-            reported = bool(await self._on_job_complete(job_id))
+            reported = bool(await self._on_job_complete(job_id, attempts=attempts, printed_at=printed_at))
         if reported and self._job_store:
             self._job_store.mark_reported(job_id)
 
-    async def _report_failed(self, job_id: str, error_code: str, error_message: str) -> None:
+    async def _report_failed(self, job_id: str, error_code: str, error_message: str, attempts: int = 0) -> None:
         if self._job_store:
-            self._job_store.mark_outcome(job_id, "failed", error_code, error_message)
+            self._job_store.mark_outcome(job_id, "failed", error_code, error_message, attempts=attempts)
         reported = False
         if self._on_job_failed:
-            reported = bool(await self._on_job_failed(job_id, error_code, error_message))
+            reported = bool(await self._on_job_failed(job_id, error_code, error_message, attempts=attempts))
         if reported and self._job_store:
             self._job_store.mark_reported(job_id)
 
@@ -263,7 +277,7 @@ class JobQueue:
                     logger.error(
                         f"Job {job.job_id} failed after {job.attempts} attempts in {elapsed:.0f}s: {error_msg}"
                     )
-                    await self._report_failed(job.job_id, error_code, error_msg)
+                    await self._report_failed(job.job_id, error_code, error_msg, attempts=job.attempts)
                     return
                 delay = RETRY_DELAYS[min(job.attempts - 1, len(RETRY_DELAYS) - 1)]
                 logger.warning(
@@ -284,7 +298,7 @@ class JobQueue:
             job.status = "completed"
             self._stats[printer_id]["completed"] += 1
             logger.info(f"Job {job.job_id} completed on printer '{printer.name}'")
-            await self._report_complete(job.job_id)
+            await self._report_complete(job.job_id, attempts=job.attempts)
             return
 
     def get_queue_stats(self) -> dict[str, Any]:
