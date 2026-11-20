@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QBrush,
     QCloseEvent,
@@ -755,7 +755,12 @@ class Controller(QObject):
         if self.args.capture_tray_menu and self.tray is not None:
             menu = self._tray_menu
             geo = self.tray.geometry()
-            pos = geo.topLeft() if not geo.isNull() else win.geometry().center()
+            size = menu.sizeHint()
+            if geo.isNull():
+                pos = win.geometry().center()
+            else:
+                # like the shell does: above the icon, horizontally centred
+                pos = QPoint(geo.center().x() - size.width() // 2, geo.top() - size.height())
             menu.popup(pos)
             QTimer.singleShot(800, lambda: self._finish_capture(menu.grab(), target, timed_out))
             return
