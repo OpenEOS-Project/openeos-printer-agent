@@ -167,8 +167,8 @@ begin
     Params := 'install-service --server-url "' + ServerUrl() + '"';
     if not Exec(ExpandConstant('{app}\{#ServiceExe}'), Params, ExpandConstant('{app}'),
                 SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
-      SuppressibleMsgBox(FmtMessage(CustomMessage('ServiceFailed'),
-        [IntToStr(Code), ExpandConstant('{commonappdata}\OpenEOS Printer Agent\logs\agent.log')]),
-        mbError, MB_OK, IDOK);
+      // (no line may start with "[" in [Code] - Inno reads it as a section)
+      SuppressibleMsgBox(FmtMessage(CustomMessage('ServiceFailed'), [IntToStr(Code),
+        ExpandConstant('{commonappdata}\OpenEOS Printer Agent\logs\agent.log')]), mbError, MB_OK, IDOK);
   end;
 end;
