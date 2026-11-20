@@ -49,6 +49,14 @@ PRINTER_STATUS_NOT_AVAILABLE = 0x00001000
 PRINTER_ATTRIBUTE_WORK_OFFLINE = 0x00000400
 
 JOB_TIMEOUT_S = 30.0
+ERROR_INVALID_PARAMETER = 87  # GetJob for a job that is no longer queued
+
+
+def _winerror(e: BaseException) -> Optional[int]:
+    code = getattr(e, "winerror", None)
+    if code is None and e.args and isinstance(e.args[0], int):
+        code = e.args[0]
+    return code
 
 
 class SpoolerTransport:
@@ -110,8 +118,15 @@ class SpoolerTransport:
         while True:
             try:
                 info = self._wp.GetJob(handle, job_id, 1)
-            except Exception:
-                return  # gone from the queue: printed and removed
+            except Exception as e:
+                if _winerror(e) == ERROR_INVALID_PARAMETER:
+                    return  # job id unknown: printed and removed from the queue
+                # Spooler briefly unavailable (restart, RPC hiccup): this says
+                # nothing about the job - keep watching until the deadline.
+                if time.monotonic() >= deadline:
+                    raise PrinterNoConfirmation(f"Could not check the print job on '{self.name}': {e}") from e
+                self._sleep(self._poll)
+                continue
             status = int(info.get("Status", 0))
             if status & (JOB_STATUS_PRINTED | JOB_STATUS_COMPLETE):
                 return
