@@ -567,7 +567,10 @@ class FakeWin32Print:
     def GetJob(self, h, job_id, level):
         if not self.statuses:
             raise OSError(87, "GetJob", "job gone")
-        return {"Status": self.statuses.pop(0)}
+        status = self.statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return {"Status": status}
 
     def SetJob(self, h, job_id, level, info, command):
         assert command == ws.JOB_CONTROL_DELETE
@@ -589,6 +592,15 @@ class TestSpooler:
         t.send(b"B")
         assert fake.docs == [b"A", b"B"]
         assert fake.open_docs == 0 and fake.handles_open == 0
+
+    def test_spooler_hiccup_is_not_taken_as_printed(self):
+        rpc_down = OSError(1722, "GetJob", "RPC server unavailable")
+        fake = FakeWin32Print(statuses=[rpc_down, rpc_down, ws.JOB_STATUS_OFFLINE])
+        with pytest.raises(PrinterStatusError):
+            _spooler(fake).send(b"x")
+        fake = FakeWin32Print(statuses=[rpc_down] * 1000)
+        with pytest.raises(PrinterNoConfirmation):
+            _spooler(fake, timeout=0).send(b"x")
 
     def test_printed_flag_counts(self):
         _spooler(FakeWin32Print(statuses=[ws.JOB_STATUS_PRINTED])).send(b"x")
