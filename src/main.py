@@ -35,6 +35,17 @@ logger = logging.getLogger(__name__)
 # right away regardless (``urgent``).
 AUTH_CHECK_MIN_INTERVAL_S = 30.0
 
+# Printer probes (network printers: real TCP connect + status query) and
+# redelivery of job outcomes the server has not acknowledged yet.
+HEALTH_CHECK_INTERVAL_S = 30.0
+PRUNE_INTERVAL_S = 3600.0
+# Wake-up detection: the watch loop ticks every WAKE_CHECK_INTERVAL_S; a tick
+# that took WAKE_JUMP_S longer on the wall clock means the computer slept
+# (or the clock jumped - reconnecting then is harmless).
+WAKE_CHECK_INTERVAL_S = 5.0
+WAKE_JUMP_S = 20.0
+WAKE_DEBOUNCE_S = 30.0
+
 
 class PrinterAgent:
     """Main orchestrator for the OpenEOS Printer Agent."""
@@ -56,6 +67,9 @@ class PrinterAgent:
         self._local_server: Optional[LocalServer] = None
         self._discovery: Optional[DiscoveryService] = None
         self._health_check_task: Optional[asyncio.Task[None]] = None
+        self._wake_task: Optional[asyncio.Task[None]] = None
+        self._reconnect_task: Optional[asyncio.Task[None]] = None
+        self._last_resume = 0.0
 
         # Jobs the backend replays immediately on (re)connect can arrive before
         # the job queue + workers exist (connect happens several startup steps
@@ -151,8 +165,12 @@ class PrinterAgent:
         try:
             await self._ws_client.connect()
         except Exception as e:
+            # python-socketio does not retry a failed *first* connect (only
+            # drops of an established one) - e.g. the laptop booted before
+            # its Wi-Fi was up. Keep trying in the background.
             logger.error(f"Initial WebSocket connection failed: {e}")
-            logger.info("Will retry automatically...")
+            logger.info("Retrying in the background...")
+            self._start_reconnect()
 
         # 10. Fetch the adopted printers from the backend (REST API)
         printer_configs = await self._api_client.get_printers()
@@ -208,8 +226,9 @@ class PrinterAgent:
         # 15. Discovery: first scan now, then every 5 minutes / on request
         self._discovery.start()
 
-        # 16. Periodic health checks
+        # 16. Periodic health checks + wake-up detection
         self._health_check_task = asyncio.create_task(self._health_check_loop())
+        self._wake_task = asyncio.create_task(self._wake_watch_loop(), name="wake-watch")
 
         logger.info("Printer Agent fully started")
 
@@ -300,16 +319,78 @@ class PrinterAgent:
         logger.info(f"Connected again as device {device_id} (organization: {registrar.organization_name or '-'})")
 
     async def _health_check_loop(self) -> None:
-        """Periodic printer health checks (every 60s)."""
+        """Every HEALTH_CHECK_INTERVAL_S: probe printers (a printer seen
+        online again ends the retry pause of its waiting jobs), resend
+        unacknowledged job outcomes, and now and then prune the job store."""
+        last_prune = 0.0
         while True:
             try:
-                await asyncio.sleep(60)
-                if self._printer_manager:
-                    await self._printer_manager.health_check_all()
+                await asyncio.sleep(HEALTH_CHECK_INTERVAL_S)
+                await self._check_printers()
+                if self._ws_client is not None and self._ws_client.is_connected:
+                    await self._handle_server_ready()
+                if self._job_store and time.monotonic() - last_prune > PRUNE_INTERVAL_S:
+                    last_prune = time.monotonic()
+                    pruned = self._job_store.prune()
+                    if pruned:
+                        logger.debug(f"Pruned {pruned} finished job(s) from the job store")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Health check error: {e}")
+
+    async def _check_printers(self) -> None:
+        if not self._printer_manager:
+            return
+        await self._printer_manager.health_check_all()
+        if self._job_queue:
+            for printer in self._printer_manager.get_all_printers():
+                if printer.is_online:
+                    self._job_queue.wake_retries(printer.printer_id)
+
+    # -- sleep / wake-up -------------------------------------------------------
+
+    async def _wake_watch_loop(self) -> None:
+        """Detect that the computer slept: asyncio's timers stand still during
+        suspend, the wall clock does not."""
+        last = time.time()
+        while True:
+            try:
+                await asyncio.sleep(WAKE_CHECK_INTERVAL_S)
+            except asyncio.CancelledError:
+                break
+            now = time.time()
+            gap = now - last - WAKE_CHECK_INTERVAL_S
+            last = now
+            if gap > WAKE_JUMP_S:
+                self.notify_resume(f"clock jumped {gap:.0f}s")
+
+    def notify_resume(self, reason: str) -> None:
+        """Woke up (time jump or Windows power event): the server socket is
+        dead even if the library has not noticed - rebuild it now instead of
+        after the ping timeout; check printers and retry waiting jobs."""
+        if time.monotonic() - self._last_resume < WAKE_DEBOUNCE_S:
+            return
+        self._last_resume = time.monotonic()
+        logger.info(f"Resumed from sleep ({reason}) - reconnecting and checking printers")
+        if self._ws_client is not None and (self._recovery_task is None or self._recovery_task.done()):
+            self._start_reconnect()
+        if self._job_queue:
+            self._job_queue.wake_retries()
+        asyncio.create_task(self._check_printers(), name="resume-printer-check")
+
+    def notify_resume_threadsafe(self, reason: str) -> None:
+        """From the Windows service control handler (another thread)."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self.notify_resume, reason)
+
+    def _start_reconnect(self) -> None:
+        if self._ws_client is None:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._ws_client.force_reconnect(), name="ws-force-reconnect")
 
     async def _handle_print_job(self, data: dict[str, Any]) -> bool:
         """Callback when a print job is received via WebSocket.
@@ -354,7 +435,7 @@ class PrinterAgent:
                     row.get("error_message") or "Unknown error",
                 )
             if reported:
-                self._job_store.remove(job_id)
+                self._job_store.mark_reported(job_id)
                 logger.info(f"Delivered stored outcome for job {job_id}")
 
     async def _handle_template_update(self, data: dict[str, Any]) -> None:
@@ -458,7 +539,7 @@ class PrinterAgent:
         logger.info("Shutting down Printer Agent...")
 
         # 1. Stop health checks + discovery (+ a running token recovery)
-        for task in (self._health_check_task, self._recovery_task):
+        for task in (self._health_check_task, self._recovery_task, self._wake_task, self._reconnect_task):
             if task:
                 task.cancel()
                 try:

@@ -10,7 +10,13 @@ from .template_engine import TemplateEngine
 
 logger = logging.getLogger(__name__)
 
-RETRY_DELAYS = [2, 10, 30]  # seconds
+# Printer errors (offline, paper out, cover open, no confirmation) are
+# retried with growing pauses for RETRY_WINDOW_S before the job is reported
+# as failed - a printer that is switched back on, refilled or closed within
+# that time prints the ticket after all. The pause before the next attempt
+# ends early when the printer is seen online again (``wake_retries``).
+RETRY_DELAYS = [2, 5, 10, 20, 30]  # seconds; the last one repeats
+RETRY_WINDOW_S = 10 * 60
 MAX_QUEUE_SIZE = 100
 
 
@@ -68,6 +74,8 @@ class JobQueue:
         self._queues: dict[str, asyncio.Queue[PrintJob]] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._stats: dict[str, dict[str, int]] = {}
+        self._wakeups: dict[str, asyncio.Event] = {}
+        self._report_tasks: set[asyncio.Task[None]] = set()
 
     def start_workers(self) -> None:
         """Start a worker task for each configured printer."""
@@ -75,6 +83,7 @@ class JobQueue:
             pid = printer.printer_id
             self._queues[pid] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
             self._stats[pid] = {"queued": 0, "completed": 0, "failed": 0}
+            self._wakeups[pid] = asyncio.Event()
             self._workers[pid] = asyncio.create_task(
                 self._worker(pid),
                 name=f"worker-{pid}",
@@ -83,7 +92,7 @@ class JobQueue:
 
     async def stop_workers(self) -> None:
         """Stop all worker tasks."""
-        for task in self._workers.values():
+        for task in list(self._workers.values()) + list(self._report_tasks):
             task.cancel()
         if self._workers:
             await asyncio.gather(*self._workers.values(), return_exceptions=True)
@@ -102,7 +111,7 @@ class JobQueue:
 
         if persist and self._job_store:
             if not self._job_store.add(job.job_id, job_data):
-                logger.info(f"Job {job.job_id} already known — duplicate delivery ignored")
+                self._handle_duplicate(job.job_id)
                 return True
 
         queue = self._queues.get(job.printer_id)
@@ -132,27 +141,50 @@ class JobQueue:
         if jobs:
             logger.info(f"Restored {len(jobs)} persisted print job(s)")
 
+    def _handle_duplicate(self, job_id: str) -> None:
+        """The server delivered a job we already have. Still pending: it is in
+        the queue, nothing to do. Finished: never print again - send the
+        outcome once more, the server evidently did not get it."""
+        assert self._job_store is not None
+        row = self._job_store.get(job_id)
+        if row is None or row["status"] == "pending":
+            logger.info(f"Job {job_id} already queued - duplicate delivery ignored")
+            return
+        logger.info(f"Job {job_id} was already {row['status']} - not printing again, re-sending the outcome")
+        if row["status"] == "completed":
+            coro = self._report_complete(job_id)
+        else:
+            coro = self._report_failed(job_id, row.get("error_code") or "UNKNOWN", row.get("error_message") or "")
+        task = asyncio.create_task(coro, name=f"re-report-{job_id}")
+        self._report_tasks.add(task)
+        task.add_done_callback(self._report_tasks.discard)
+
+    def wake_retries(self, printer_id: Optional[str] = None) -> None:
+        """End the pause of jobs waiting for a retry (printer back online,
+        computer woke up)."""
+        for pid, event in self._wakeups.items():
+            if printer_id is None or pid == printer_id:
+                event.set()
+
     async def _report_complete(self, job_id: str) -> None:
-        """Report success to the server; keep the outcome locally if offline."""
+        """Persist the outcome, then report it. The row stays (for duplicate
+        detection) and is marked reported only after the server's ack."""
+        if self._job_store:
+            self._job_store.mark_outcome(job_id, "completed")
         reported = False
         if self._on_job_complete:
             reported = bool(await self._on_job_complete(job_id))
-        if self._job_store:
-            if reported:
-                self._job_store.remove(job_id)
-            else:
-                self._job_store.mark_outcome(job_id, "completed")
+        if reported and self._job_store:
+            self._job_store.mark_reported(job_id)
 
     async def _report_failed(self, job_id: str, error_code: str, error_message: str) -> None:
-        """Report failure to the server; keep the outcome locally if offline."""
+        if self._job_store:
+            self._job_store.mark_outcome(job_id, "failed", error_code, error_message)
         reported = False
         if self._on_job_failed:
             reported = bool(await self._on_job_failed(job_id, error_code, error_message))
-        if self._job_store:
-            if reported:
-                self._job_store.remove(job_id)
-            else:
-                self._job_store.mark_outcome(job_id, "failed", error_code, error_message)
+        if reported and self._job_store:
+            self._job_store.mark_reported(job_id)
 
     async def _worker(self, printer_id: str) -> None:
         """Worker loop: process jobs from the queue for a specific printer."""
@@ -185,7 +217,7 @@ class JobQueue:
                 queue.task_done()
 
     async def _process_job(self, printer_id: str, job: PrintJob) -> None:
-        """Process a single print job with retry logic."""
+        """Render once, then print with retries while the printer has trouble."""
         printer = self._printer_manager.get_printer(printer_id)
         if printer is None:
             logger.error(f"Printer {printer_id} not found for job {job.job_id}")
@@ -193,59 +225,67 @@ class JobQueue:
             self._stats[printer_id]["failed"] += 1
             return
 
-        max_attempts = len(RETRY_DELAYS) + 1
+        try:
+            rendered = self._template_engine.render(
+                job.template_name,
+                {**job.payload, "paper_width": printer.paper_width, "columns": printer.columns},
+            )
+        except Exception as e:
+            # Retrying cannot fix a broken template or payload.
+            job.status = "failed"
+            job.error = str(e) or type(e).__name__
+            self._stats[printer_id]["failed"] += 1
+            logger.error(f"Job {job.job_id} could not be rendered: {job.error}")
+            await self._report_failed(job.job_id, "TEMPLATE_ERROR", job.error)
+            return
 
-        while job.attempts < max_attempts:
+        # A named function instead of a lambda here, because mypy cannot infer
+        # parameter types for a lambda that carries extra defaulted arguments
+        # (the r=/o= trick binds the current values instead of late binding).
+        def _do_print(p: Any, r: str = rendered, o: dict[str, Any] = {"copies": job.copies}) -> None:
+            render_to_printer(p, r, o)
+
+        started = time.monotonic()
+        wakeup = self._wakeups.setdefault(printer_id, asyncio.Event())
+        while True:
             job.attempts += 1
             job.status = "printing"
-
             try:
-                # Render template
-                rendered = self._template_engine.render(
-                    job.template_name,
-                    {**job.payload, "paper_width": printer.paper_width, "columns": printer.columns},
-                )
-
-                # Send to printer. A named function instead of a lambda here,
-                # because mypy cannot infer parameter types for a lambda that
-                # carries extra defaulted arguments (the r=/o= trick binds the
-                # current `rendered`/`job.copies` by value instead of by the
-                # loop variable's later state) against printer.execute's
-                # Callable[[Usb | Network], None] parameter type.
-                def _do_print(p: Any, r: str = rendered, o: dict[str, Any] = {"copies": job.copies}) -> None:
-                    render_to_printer(p, r, o)
-
                 await printer.execute(_do_print)
-
-                # Success
-                job.status = "completed"
-                self._stats[printer_id]["completed"] += 1
-                logger.info(f"Job {job.job_id} completed on printer '{printer.name}'")
-
-                await self._report_complete(job.job_id)
-                return
-
             except Exception as e:
-                error_msg = str(e)
+                error_msg = printer.last_error or str(e) or type(e).__name__
                 error_code = printer.last_error_code.value if printer.last_error_code else "UNKNOWN"
-                logger.warning(f"Job {job.job_id} attempt {job.attempts}/{max_attempts} failed: {error_msg}")
-
-                if job.attempts < max_attempts:
-                    delay = RETRY_DELAYS[job.attempts - 1]
-                    logger.info(f"Retrying job {job.job_id} in {delay}s...")
-                    await asyncio.sleep(delay)
-
-                    # Try reconnecting printer
-                    if printer.status in (PrinterStatus.ERROR, PrinterStatus.OFFLINE):
-                        await printer.reconnect()
-                else:
-                    # All attempts exhausted
+                elapsed = time.monotonic() - started
+                if elapsed >= RETRY_WINDOW_S:
                     job.status = "failed"
                     job.error = error_msg
                     self._stats[printer_id]["failed"] += 1
-                    logger.error(f"Job {job.job_id} failed after {max_attempts} attempts: {error_msg}")
-
+                    logger.error(
+                        f"Job {job.job_id} failed after {job.attempts} attempts in {elapsed:.0f}s: {error_msg}"
+                    )
                     await self._report_failed(job.job_id, error_code, error_msg)
+                    return
+                delay = RETRY_DELAYS[min(job.attempts - 1, len(RETRY_DELAYS) - 1)]
+                logger.warning(
+                    f"Job {job.job_id} attempt {job.attempts} failed ({error_code}: {error_msg}); retrying in {delay}s"
+                )
+                wakeup.clear()
+                try:
+                    await asyncio.wait_for(wakeup.wait(), timeout=delay)
+                    logger.info(f"Retrying job {job.job_id} now (printer back / computer woke up)")
+                except asyncio.TimeoutError:
+                    pass
+                # USB/spooler handles go bad with the device; network printers
+                # open a fresh connection per job anyway.
+                if not printer.uses_transport and printer.status in (PrinterStatus.ERROR, PrinterStatus.OFFLINE):
+                    await printer.reconnect()
+                continue
+
+            job.status = "completed"
+            self._stats[printer_id]["completed"] += 1
+            logger.info(f"Job {job.job_id} completed on printer '{printer.name}'")
+            await self._report_complete(job.job_id)
+            return
 
     def get_queue_stats(self) -> dict[str, Any]:
         """Get statistics for all printer queues."""

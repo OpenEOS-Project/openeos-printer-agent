@@ -20,6 +20,10 @@ from .paths import default_data_dir, is_frozen
 
 logger = logging.getLogger(__name__)
 
+# WM_POWERBROADCAST event types (winuser.h)
+PBT_APMRESUMESUSPEND = 0x0007
+PBT_APMRESUMEAUTOMATIC = 0x0012
+
 SERVICE_NAME = "OpenEOSPrinterAgent"
 SERVICE_DISPLAY_NAME = "OpenEOS Printer Agent"
 SERVICE_DESCRIPTION = (
@@ -67,6 +71,20 @@ if _PYWIN32_AVAILABLE:
             super().__init__(args)
             self._stop_event = win32event.CreateEvent(None, 0, 0, None)
             self._agent: Any = None
+
+        def GetAcceptedControls(self) -> int:
+            # Ask for power events: after sleep the service is told right
+            # away (PBT_APMRESUMEAUTOMATIC) instead of discovering dead
+            # sockets on its own.
+            return int(super().GetAcceptedControls() | win32service.SERVICE_ACCEPT_POWEREVENT)
+
+        def SvcOtherEx(self, control: int, event_type: int, data: Any) -> None:
+            if control == win32service.SERVICE_CONTROL_POWEREVENT and event_type in (
+                PBT_APMRESUMEAUTOMATIC,
+                PBT_APMRESUMESUSPEND,
+            ):
+                if self._agent is not None:
+                    self._agent.notify_resume_threadsafe("Windows power event")
 
         def SvcStop(self) -> None:
             self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)

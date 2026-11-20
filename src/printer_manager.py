@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import socket
 from enum import Enum
 from typing import Any, Callable, Optional
 
-from escpos.printer import Dummy, Network, Usb
+from escpos.printer import Dummy, Usb
 
 from .escpos_text import escpos_to_text
+from .net_printer import NetworkTransport, PrinterNoConfirmation, PrinterStatusError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,18 @@ def _parse_usb_id(value: Any) -> int:
     return int(text, 16)
 
 
+def describe_error(e: BaseException) -> str:
+    """Never an empty message (escpos raises bare asserts/OSErrors)."""
+    text = str(e).strip()
+    if isinstance(e, (socket.timeout, TimeoutError)) and not text:
+        return "Timeout while talking to the printer"
+    if not text:
+        return type(e).__name__
+    if isinstance(e, OSError) and type(e).__name__ not in text:
+        return f"{type(e).__name__}: {text}"
+    return text
+
+
 class ManagedPrinter:
     """Wrapper for a single physical printer with status tracking and locking."""
 
@@ -61,25 +75,79 @@ class ManagedPrinter:
         self.last_error_code: Optional[PrinterErrorCode] = None
         self._dummy = dummy
         self._escpos: Optional[EscposPrinter] = None
+        # Network printers: the escpos object only buffers (Dummy); the bytes
+        # go out over a fresh, confirmed connection per job (net_printer.py).
+        self._transport: Optional[NetworkTransport] = None
         self._lock = asyncio.Lock()
 
+    @property
+    def uses_transport(self) -> bool:
+        return self._transport is not None
+
     async def connect(self) -> bool:
-        """Connect to the physical printer."""
+        """Set up the backend and find out whether the printer is reachable.
+
+        Network printers are actually contacted (TCP connect + status query),
+        so "online" means online. They stay usable even when the probe fails:
+        every job opens its own connection, a printer that comes back later
+        just works.
+        """
         loop = asyncio.get_running_loop()
         try:
             self._escpos = await loop.run_in_executor(None, self._create_escpos)
-            self.status = PrinterStatus.ONLINE
-            self.last_error = None
-            self.last_error_code = None
-            backend = "dummy" if self._dummy else self.connection_type
-            logger.info(f"Printer '{self.name}' ({self.printer_id}) connected via {backend}")
-            return True
         except Exception as e:
-            self.status = PrinterStatus.ERROR
-            self.last_error = str(e)
-            self.last_error_code = self._classify_error(e)
-            logger.error(f"Printer '{self.name}' ({self.printer_id}) connection failed: {e}")
+            self._set_error(e)
+            logger.error(f"Printer '{self.name}' ({self.printer_id}) connection failed: {self.last_error}")
             return False
+        if self._transport is not None:
+            return await self.probe(log=True)
+        self._set_online()
+        backend = "dummy" if self._dummy else self.connection_type
+        logger.info(f"Printer '{self.name}' ({self.printer_id}) connected via {backend}")
+        return True
+
+    async def probe(self, log: bool = False) -> bool:
+        """Network printers: open a connection and ask for the status.
+        Skipped while a job holds the printer (that job tells us anyway)."""
+        transport = self._transport
+        if transport is None:
+            return self.is_online
+        if self._lock.locked():
+            return self.is_online
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            was = self.status
+            try:
+                state = await loop.run_in_executor(None, transport.probe)
+            except Exception as e:
+                self._set_error(e)
+                if log or was != self.status:
+                    logger.warning(f"Printer '{self.name}' ({self.printer_id}) not reachable: {self.last_error}")
+                return False
+            problem = state.problem if state is not None else None
+            if problem:
+                self.status = PrinterStatus.ERROR
+                self.last_error_code = PrinterErrorCode(problem[0])
+                self.last_error = problem[1]
+                if log or was != self.status:
+                    logger.warning(f"Printer '{self.name}' ({self.printer_id}): {problem[1]}")
+                return False
+            self._set_online()
+            if log or was != self.status:
+                how = "status confirmed" if state is not None else "reachable, no status support"
+                logger.info(f"Printer '{self.name}' ({self.printer_id}) online via network ({how})")
+            return True
+
+    def _set_online(self) -> None:
+        self.status = PrinterStatus.ONLINE
+        self.last_error = None
+        self.last_error_code = None
+
+    def _set_error(self, e: Exception) -> None:
+        self.last_error = describe_error(e)
+        self.last_error_code = self._classify_error(e)
+        connection_lost = self.last_error_code in (PrinterErrorCode.CONNECTION_FAILED, PrinterErrorCode.PRINTER_OFFLINE)
+        self.status = PrinterStatus.OFFLINE if connection_lost else PrinterStatus.ERROR
 
     def _create_escpos(self) -> EscposPrinter:
         """Create escpos printer instance (runs in executor)."""
@@ -111,7 +179,9 @@ class ManagedPrinter:
             if not ip_address:
                 raise ValueError(f"Network printer '{self.name}' requires ipAddress in connectionConfig")
             port = int(conn.get("port") or 9100)
-            return Network(ip_address, port=port)
+            self._transport = NetworkTransport(str(ip_address), port=port)
+            # Same profile/encoding as escpos.Network; only collects bytes.
+            return Dummy()
 
         if self.connection_type == "windows":
             printer_name = conn.get("windowsPrinterName")
@@ -133,18 +203,31 @@ class ManagedPrinter:
 
             loop = asyncio.get_running_loop()
             try:
-                await loop.run_in_executor(None, callback, self._escpos)
-                self.status = PrinterStatus.ONLINE
-                self.last_error = None
-                self.last_error_code = None
+                if self._transport is not None:
+                    await loop.run_in_executor(None, self._render_and_send, callback)
+                else:
+                    await loop.run_in_executor(None, callback, self._escpos)
+                self._set_online()
             except Exception as e:
-                self.status = PrinterStatus.ERROR
-                self.last_error = str(e)
-                self.last_error_code = self._classify_error(e)
+                self._set_error(e)
                 raise
             finally:
                 if self._dummy:
                     self._flush_dummy_output()
+
+    def _render_and_send(self, callback: Callable[[EscposPrinter], None]) -> None:
+        """Network: render into the buffer, then one confirmed send."""
+        buffer = self._escpos
+        transport = self._transport
+        assert isinstance(buffer, Dummy) and transport is not None
+        buffer.clear()
+        try:
+            callback(buffer)
+            data = bytes(buffer.output)
+        finally:
+            buffer.clear()
+        if data:
+            transport.send(data)
 
     def _flush_dummy_output(self) -> None:
         """``--dummy-printer``: log the ESC/POS stream as text and reset the buffer."""
@@ -176,6 +259,15 @@ class ManagedPrinter:
 
     def _classify_error(self, error: Exception) -> PrinterErrorCode:
         """Classify exception into a known error code."""
+        if isinstance(error, PrinterStatusError):
+            try:
+                return PrinterErrorCode(error.code)
+            except ValueError:
+                return PrinterErrorCode.UNKNOWN
+        if isinstance(error, PrinterNoConfirmation):
+            return PrinterErrorCode.PRINTER_OFFLINE
+        if isinstance(error, (ConnectionError, TimeoutError, socket.timeout, socket.gaierror)):
+            return PrinterErrorCode.CONNECTION_FAILED
         msg = str(error).lower()
         if "paper" in msg or "paper end" in msg:
             return PrinterErrorCode.PAPER_OUT
@@ -185,7 +277,9 @@ class ManagedPrinter:
             return PrinterErrorCode.PRINTER_OFFLINE
         if "usb" in msg or "device not found" in msg:
             return PrinterErrorCode.USB_ERROR
-        if "connect" in msg or "timeout" in msg or "refused" in msg:
+        if "connect" in msg or "timeout" in msg or "refused" in msg or "unreachable" in msg:
+            return PrinterErrorCode.CONNECTION_FAILED
+        if isinstance(error, OSError) and self._transport is not None:
             return PrinterErrorCode.CONNECTION_FAILED
         return PrinterErrorCode.UNKNOWN
 
@@ -315,11 +409,17 @@ class PrinterManager:
         return [p.get_heartbeat_dict() for p in self._printers.values()]
 
     async def health_check_all(self) -> None:
-        """Check all printers and attempt reconnect for offline ones."""
+        """Network printers: real probe every round, so the online state the
+        web app shows is true. Others: reconnect when offline."""
+        checks = []
         for printer in self._printers.values():
-            if printer.status in (PrinterStatus.OFFLINE, PrinterStatus.ERROR):
+            if printer.uses_transport:
+                checks.append(printer.probe())
+            elif printer.status in (PrinterStatus.OFFLINE, PrinterStatus.ERROR):
                 logger.info(f"Attempting reconnect for printer '{printer.name}'")
-                await printer.reconnect()
+                checks.append(printer.reconnect())
+        if checks:
+            await asyncio.gather(*checks, return_exceptions=True)
 
     async def shutdown(self) -> None:
         """Disconnect all printers."""

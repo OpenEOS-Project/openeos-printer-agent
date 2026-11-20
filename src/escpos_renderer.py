@@ -4,9 +4,14 @@ import re
 from typing import Any, Optional
 
 import qrcode
+from escpos.exceptions import DeviceNotFoundError
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Errors that mean "the printer did not get this", as opposed to bad markup
+# (an unreadable image, an invalid barcode value) that only spoils one tag.
+_IO_ERRORS: tuple[type[BaseException], ...] = (OSError, DeviceNotFoundError)
 
 # Markup tag pattern. We use angle-bracket delimiters `<<X>>` for new templates
 # because the previous `{{X}}` form collides with Jinja2's expression syntax
@@ -201,6 +206,11 @@ def _handle_tag(printer: Any, tag: str, arg: Optional[str]) -> bool:
         else:
             logger.warning(f"Unknown tag: {tag}")
 
+    except _IO_ERRORS:
+        # Device/connection trouble (USB unplugged, socket gone): the job did
+        # not print - let the queue retry and report it instead of "printing"
+        # the rest of the ticket into nothing.
+        raise
     except Exception as e:
         logger.error(f"Error handling tag {tag}: {e}")
 

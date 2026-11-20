@@ -251,3 +251,67 @@ async def test_restart_reuses_token_and_replays_pending_job(api: FakeApi, stub_s
 
 async def _never_delivered(job_id: str) -> bool:
     return False
+
+
+async def test_network_printer_off_during_job_prints_later_once(api: FakeApi, stub_scanners, tmp_path, monkeypatch):
+    """Sleep/network reproduction, end to end: a real network printer
+    (tests/fake_tcp_printer.py) is off when a ticket arrives. The agent must
+    neither report it printed nor give up after 42 s; once the printer is
+    back the ticket is printed exactly once, reported with ack, and a replay
+    of the same job by the server is not printed again."""
+    from src import job_queue as jq_module
+    from tests.fake_tcp_printer import FakeTcpPrinter
+
+    monkeypatch.setattr(jq_module, "RETRY_DELAYS", [0.1])
+    tcp_printer = FakeTcpPrinter().start()
+    port = tcp_printer.port
+    config = AppConfig(
+        server_url=api.url,
+        data_dir=str(tmp_path / "data"),
+        logging=LoggingConfig(dir=str(tmp_path / "logs")),
+        local_server=LocalServerConfig(enabled=False),
+        discovery=DiscoveryConfig(interval_s=3600, mdns_timeout_s=0.01),
+    )
+    agent = PrinterAgent(config=config)
+    task = asyncio.create_task(agent.run())
+    try:
+        await api.wait_for(lambda: api.devices)
+        api.verify()
+        await api.wait_for(lambda: api.sids)
+        api.printers.append(
+            {
+                "id": "net-1",
+                "name": "Theke",
+                "type": "receipt",
+                "fingerprint": "net:test",
+                "connectionType": "network",
+                "connectionConfig": {"ipAddress": "127.0.0.1", "port": port},
+                "paperWidth": 80,
+                "isActive": True,
+            }
+        )
+        await api.emit_config_update()
+        await api.wait_for(lambda: agent.printer_manager and agent.printer_manager.get_printer("net-1"))
+        managed = agent.printer_manager.get_printer("net-1")
+        await api.wait_for(lambda: managed.is_online)
+
+        tcp_printer.stop()  # switched off
+        job = {"jobId": "job-off", "printerId": "net-1", "templateName": "_admin_test", "payload": {}}
+        assert await api.send_job(job) == {"received": True}
+        await asyncio.sleep(0.6)
+        assert api.job_completes == [] and api.job_failures == []
+        assert not managed.is_online
+
+        tcp_printer.restart()
+        await api.wait_for(lambda: api.job_completes, timeout=10)
+        assert [c["jobId"] for c in api.job_completes] == ["job-off"]
+        assert len(tcp_printer.tickets) == 1
+
+        # server replays the job (it thinks it is still printing)
+        assert await api.send_job(job) == {"received": True}
+        await api.wait_for(lambda: len(api.job_completes) == 2)
+        assert len(tcp_printer.tickets) == 1
+    finally:
+        agent.request_shutdown()
+        await asyncio.wait_for(task, 15)
+        tcp_printer.stop()
