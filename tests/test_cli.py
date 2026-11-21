@@ -48,4 +48,4 @@ class TestStatus:
         with pytest.raises(SystemExit) as exc:
             cli.main(["--version"])
         assert exc.value.code == 0
-        assert "openeos-printer-agent 0.3.0" in capsys.readouterr().out
+        assert "openeos-printer-agent 0.4.0" in capsys.readouterr().out

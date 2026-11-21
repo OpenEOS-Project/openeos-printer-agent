@@ -22,3 +22,21 @@ Earlier versions (up to commit f778b7d) declared the MIT License in
 pyproject.toml. Contributions made under those terms remain available
 under the MIT License as well; the project as a whole is distributed under
 AGPL-3.0-or-later from then on.
+
+Third-party components in the desktop window (openeos-printer-agent-ui)
+------------------------------------------------------------------------
+
+The window and tray icon use Qt for Python (PySide6, Shiboken6) and the Qt 6
+libraries, (C) The Qt Company Ltd. and other contributors, used under the
+GNU Lesser General Public License version 3 (LGPL-3.0-only). Source code and
+license texts: https://code.qt.io/ and https://www.qt.io/licensing/.
+
+LGPL-3.0 libraries may be combined with AGPL-3.0-or-later code: the Qt
+libraries stay separate shared libraries (in the installed folder on
+Windows, unpacked to a temporary folder by the single-file Linux binary)
+and are not modified. Because the complete source of this program and its
+build scripts (openeos-printer-agent-ui.spec, packaging/) are public, you can
+rebuild the window against a modified or newer Qt/PySide6 at any time, as
+LGPL-3.0 section 4 requires.
+
+The background service (openeos-printer-agent) does not contain Qt.

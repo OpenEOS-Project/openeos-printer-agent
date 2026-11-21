@@ -1,9 +1,13 @@
 name: Release-Binaerdateien
 
-# Bei einem Tag v* werden PyInstaller-Onefile-Binaerdateien fuer Windows x64,
-# Linux x64 und Linux arm64 (Raspberry Pi 4/5, 64-bit OS) gebaut und mit
-# SHA256SUMS an ein GitHub-Release gehaengt. arm64 laeuft nativ auf den
-# ubuntu-24.04-arm-Runnern (fuer oeffentliche Repos kostenlos), kein QEMU.
+# Bei einem Tag v* entstehen:
+#   Windows x64: Dienst-EXE (wie bisher) und ein Installer (Inno Setup) mit
+#                Dienst + Fenster/Infobereich, Startmenue und Autostart
+#   Linux x64 und arm64: Dienst und Fenster als Einzeldateien, gebaut in
+#                Containern mit altem glibc (packaging/linux/build-binaries.sh),
+#                damit sie auch auf Ubuntu 22.04, Debian 11/12 und Raspberry Pi
+#                OS Bookworm laufen. arm64 baut nativ auf ubuntu-24.04-arm.
+# Alles mit SHA256SUMS an ein GitHub-Release.
 on:
   push:
     tags: ['v*']
@@ -13,23 +17,13 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.artifact }}
-    runs-on: ${{ matrix.os }}
+  windows:
+    name: Windows x64 (EXE und Installer)
+    runs-on: windows-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: openeos-printer-agent-windows-x64.exe
-            requirements: requirements-windows.txt
-          - os: ubuntu-24.04
-            artifact: openeos-printer-agent-linux-x64
-            requirements: requirements.txt
-          - os: ubuntu-24.04-arm
-            artifact: openeos-printer-agent-linux-arm64
-            requirements: requirements.txt
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout
@@ -40,46 +34,79 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Systemabhaengigkeiten (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libusb-1.0-0 libjpeg-dev
-
       - name: Abhaengigkeiten installieren
         run: |
           python -m pip install --upgrade pip
-          pip install -r ${{ matrix.requirements }} -r requirements-build.txt
+          pip install -r requirements-windows.txt -r requirements-build.txt -r requirements-ui.txt
           pip install --no-deps .
 
-      - name: Binaerdatei bauen
-        run: pyinstaller --clean --noconfirm openeos-printer-agent.spec
-
-      - name: Rauchtest
-        shell: bash
+      - name: Dienst-EXE und Fenster bauen
         run: |
-          BIN=dist/openeos-printer-agent
-          if [ "${{ runner.os }}" = "Windows" ]; then BIN="$BIN.exe"; fi
-          "$BIN" --version
-          "$BIN" --help
+          pyinstaller --clean --noconfirm openeos-printer-agent.spec
+          pyinstaller --clean --noconfirm openeos-printer-agent-ui.spec
+          # one-folder service build for the installer (starts without unpacking)
+          $env:OPENEOS_ONEDIR = "1"
+          pyinstaller --noconfirm --distpath dist\service --workpath build\service openeos-printer-agent.spec
+          Remove-Item Env:OPENEOS_ONEDIR
+          dist\openeos-printer-agent.exe --version
+          dist\openeos-printer-agent.exe --help
+
+      - name: Installer bauen (Inno Setup)
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          $version = (python -c "from src.version import get_version; print(get_version())").Trim()
+          & $iscc /Qp "/DAppVersion=$version" packaging\windows\openeos-printer-agent.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
       - name: Umbenennen
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            mv dist/openeos-printer-agent.exe "dist/${{ matrix.artifact }}"
-          else
-            mv dist/openeos-printer-agent "dist/${{ matrix.artifact }}"
-          fi
+        run: Move-Item dist\openeos-printer-agent.exe dist\openeos-printer-agent-windows-x64.exe
 
       - name: Artefakt hochladen
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: windows-x64
+          path: |
+            dist/openeos-printer-agent-windows-x64.exe
+            dist/openeos-printer-agent-setup-windows-x64.exe
+          if-no-files-found: error
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Bauen (Debian 11 / Ubuntu 22.04)
+        run: packaging/linux/build-binaries.sh --out dist-linux
+
+      - name: Rauchtest auf Debian 11 und Ubuntu 22.04
+        run: |
+          for image in debian:bullseye ubuntu:22.04; do
+            docker run --rm -v "$PWD/dist-linux:/d:ro" "$image" /d/openeos-printer-agent-linux-${{ matrix.arch }} --version
+          done
+
+      - name: Artefakt hochladen
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist-linux/openeos-printer-agent-*
           if-no-files-found: error
 
   release:
     name: GitHub-Release
-    needs: build
+    needs: [windows, linux]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     if: startsWith(github.ref, 'refs/tags/v')
@@ -106,13 +133,19 @@ jobs:
 
           | Datei | Plattform |
           |---|---|
-          | openeos-printer-agent-windows-x64.exe | Windows 10/11 (64-bit) |
-          | openeos-printer-agent-linux-x64 | Linux x86_64 |
-          | openeos-printer-agent-linux-arm64 | Linux arm64 (Raspberry Pi 4/5, 64-bit OS) |
+          | openeos-printer-agent-setup-windows-x64.exe | Windows 10/11 (64-bit): Installer mit Dienst, Fenster und Infobereich - empfohlen |
+          | openeos-printer-agent-windows-x64.exe | Windows 10/11 (64-bit): nur der Dienst/Kommandozeile |
+          | openeos-printer-agent-linux-x64 | Linux x86_64 (Ubuntu 22.04+, Debian 11+) |
+          | openeos-printer-agent-linux-arm64 | Linux arm64 (Raspberry Pi 4/5 mit 64-Bit-OS) |
+          | openeos-printer-agent-ui-linux-x64 | Fenster/Infobereich fuer Linux-Desktops x86_64 (Ubuntu 22.04+, Debian 12+) |
+          | openeos-printer-agent-ui-linux-arm64 | Fenster/Infobereich fuer Raspberry Pi OS Bookworm (64-bit) mit Desktop |
 
-          Pruefsummen in SHA256SUMS. Installation: siehe README."
+          Pruefsummen in SHA256SUMS. Installation: https://docs.openeos.de/drucker"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$NOTES" \
+            artifacts/openeos-printer-agent-setup-windows-x64.exe \
             artifacts/openeos-printer-agent-windows-x64.exe \
             artifacts/openeos-printer-agent-linux-x64 \
             artifacts/openeos-printer-agent-linux-arm64 \
+            artifacts/openeos-printer-agent-ui-linux-x64 \
+            artifacts/openeos-printer-agent-ui-linux-arm64 \
             artifacts/SHA256SUMS

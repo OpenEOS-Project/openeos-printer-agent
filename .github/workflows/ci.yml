@@ -41,16 +41,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Systembibliotheken fuer Qt (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
       - name: Abhaengigkeiten installieren
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt -r requirements-ui.txt
 
       - name: Tests
         env:
           # Ein Vorlagen-Test formatiert UTC-Zeitstempel in Ortszeit;
           # die Runner laufen in UTC, lokal setzt man TZ=UTC genauso.
           TZ: UTC
+          # Fenster-Tests ohne Bildschirm
+          QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q --cov=src --cov-report=term-missing --cov-report=xml
 
       # Alle vier Laeufe laden hoch, Codecov fuehrt sie zusammen - so zaehlt
@@ -98,6 +104,55 @@ jobs:
           pyinstaller --clean --noconfirm openeos-printer-agent.spec
           dist/openeos-printer-agent --version
 
+  # Die Linux-Binaerdateien entstehen in Containern mit altem glibc (siehe
+  # packaging/linux/build-binaries.sh) - hier wird geprueft, dass sie auf den
+  # unterstuetzten Distributionen auch starten. v0.2.6 brach auf Ubuntu 22.04
+  # mit "GLIBC_2.38 not found" ab, weil sie auf ubuntu-24.04 gebaut war.
+  linux-binaries:
+    name: Linux-Binaerdateien (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Bauen (Debian 11 / Ubuntu 22.04)
+        run: packaging/linux/build-binaries.sh --out dist-linux
+
+      - name: Dienst startet auf Debian 11, Ubuntu 22.04, Debian 12
+        run: |
+          for image in debian:bullseye ubuntu:22.04 debian:bookworm; do
+            echo "== $image"
+            docker run --rm -v "$PWD/dist-linux:/d:ro" "$image" sh -ec '
+              ldd --version | head -1
+              /d/openeos-printer-agent-linux-${{ matrix.arch }} --version
+              /d/openeos-printer-agent-linux-${{ matrix.arch }} --help >/dev/null'
+          done
+
+      - name: Fenster startet auf Ubuntu 22.04 und Debian 12
+        run: |
+          for image in ubuntu:22.04 debian:bookworm; do
+            echo "== $image"
+            docker run --rm -v "$PWD/dist-linux:/d:ro" "$image" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends libegl1 libgl1 >/dev/null
+              export QT_QPA_PLATFORM=offscreen
+              /d/openeos-printer-agent-ui-linux-${{ matrix.arch }} --version
+              # draw the window once (platform plugin, fonts, widgets)
+              QT_QPA_PLATFORM=offscreen /d/openeos-printer-agent-ui-linux-${{ matrix.arch }} \
+                --no-service --port 9 --capture /tmp/window.png --capture-timeout 3
+              test -s /tmp/window.png'
+          done
+
   lint:
     name: Codepruefung
     runs-on: ubuntu-latest
@@ -116,7 +171,8 @@ jobs:
       - name: Werkzeuge installieren
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          # PySide6 bringt die Typen fuer src/ui mit (mypy)
+          pip install -r requirements.txt -r requirements-dev.txt -r requirements-ui.txt
 
       - name: ruff
         run: python -m ruff check .

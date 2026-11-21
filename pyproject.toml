@@ -28,11 +28,19 @@ dependencies = [
     "pywin32>=306; sys_platform == 'win32'",
 ]
 
+[project.optional-dependencies]
+# Desktop window + tray (see requirements-ui.txt for the per-platform pins
+# the release binaries use).
+ui = ["PySide6-Essentials>=6.8,<7"]
+
 [project.scripts]
 openeos-printer-agent = "src.cli:main"
 
+[project.gui-scripts]
+openeos-printer-agent-ui = "src.ui.app:main"
+
 [tool.setuptools]
-packages = ["src", "src.discovery"]
+packages = ["src", "src.discovery", "src.ui"]
 
 [tool.setuptools.dynamic]
 version = {attr = "src.version.__version__"}
@@ -62,6 +70,9 @@ select = ["E", "F", "W", "I"]
 # Die auf 120 Zeichen umzubrechen macht den Code nicht lesbarer, sondern
 # zerlegt Markup an willkuerlichen Stellen.
 "src/local_server.py" = ["E501"]
+# Text table of the desktop window: one entry per line reads better than
+# sentences split at 120 characters.
+"src/ui/i18n.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -89,6 +100,7 @@ module = [
     "win32service",
     "win32serviceutil",
     "win32event",
+    "win32security",
     "servicemanager",
 ]
 ignore_missing_imports = true

@@ -2,6 +2,7 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 
+from . import recent_log
 from .config import AppConfig
 
 _MARKER = "_openeos_agent_handler"
@@ -65,6 +66,9 @@ def setup_logging(config: AppConfig) -> None:
         root_logger.addHandler(file_handler)
     except OSError as e:
         root_logger.warning(f"Log file {log_file} not writable ({e}); logging to console only")
+
+    # Latest warnings/errors for the desktop window (see src/recent_log.py)
+    recent_log.install()
 
     # Reduce noise from third-party libraries
     logging.getLogger("socketio").setLevel(logging.WARNING)

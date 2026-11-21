@@ -1,11 +1,15 @@
 import html
+import ipaddress
 import logging
+import os
 import socket
+import sys
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from aiohttp import web
 
+from . import recent_log
 from .version import get_version
 
 if TYPE_CHECKING:
@@ -13,6 +17,7 @@ if TYPE_CHECKING:
     from .device_registrar import DeviceRegistrar
     from .discovery import DiscoveryService
     from .job_queue import JobQueue
+    from .power import KeepAwake
     from .printer_manager import PrinterManager
     from .system_monitor import SystemMonitor
     from .websocket_client import WebSocketClient
@@ -20,6 +25,13 @@ if TYPE_CHECKING:
 __version__ = get_version()
 
 logger = logging.getLogger(__name__)
+
+# Bumped when /api/ui/state changes incompatibly; the desktop window checks it.
+UI_API_VERSION = 1
+UI_HEADER = "X-OpenEOS-Agent-UI"
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 SETUP_HTML = """<!DOCTYPE html>
 <html lang="de">
@@ -196,8 +208,11 @@ class LocalServer:
         job_queue: Optional["JobQueue"] = None,
         ws_client: Optional["WebSocketClient"] = None,
         discovery: Optional["DiscoveryService"] = None,
+        keep_awake: Optional["KeepAwake"] = None,
     ) -> None:
         self._config = config
+        self._keep_awake = keep_awake
+        self._started_at = time.time()
         self._system_monitor = system_monitor
         self._device_registrar = device_registrar
         self._printer_manager = printer_manager
@@ -234,6 +249,11 @@ class LocalServer:
         self._app.router.add_get("/api/system", self._handle_api_system)
         self._app.router.add_get("/api/discovery", self._handle_api_discovery)
         self._app.router.add_get("/health", self._handle_health)
+        # JSON API for the desktop window (src/ui). Local machine only.
+        self._app.router.add_get("/api/ui/state", self._local_only(self._handle_ui_state))
+        self._app.router.add_post(
+            "/api/ui/printers/{printer_id}/test-print", self._local_only(self._handle_ui_test_print, write=True)
+        )
 
     async def start(self) -> None:
         cfg = self._config.local_server
@@ -292,6 +312,127 @@ class LocalServer:
             "system": sys_info,
         }
         return web.json_response(data)
+
+    # -- desktop window API ------------------------------------------------
+
+    def _local_only(self, handler: Handler, write: bool = False) -> Handler:
+        """Guard for ``/api/ui/*``.
+
+        * The peer must be this machine (unless ``allow_remote_ui``) - the
+          status page listens on all interfaces, the control API does not
+          answer the LAN.
+        * The Host header must name localhost: a web page that rebinds its
+          own DNS name to 127.0.0.1 still sends its own name.
+        * Writes need the ``X-OpenEOS-Agent-UI`` header: a cross-site form or
+          fetch from a browser cannot add it without a CORS preflight, which
+          this server never approves.
+        """
+
+        async def guarded(request: web.Request) -> web.StreamResponse:
+            if not self._config.local_server.allow_remote_ui:
+                if not _is_loopback(request.remote):
+                    return web.json_response({"error": "local_only"}, status=403)
+                if _host_name(request.host or "").lower() not in _LOCAL_HOSTS:
+                    return web.json_response({"error": "bad_host"}, status=403)
+            if write and request.headers.get(UI_HEADER) != "1":
+                return web.json_response({"error": "missing_header"}, status=403)
+            return await handler(request)
+
+        return guarded
+
+    def build_ui_state(self) -> dict[str, Any]:
+        """Everything the desktop window shows, in one document."""
+        registrar = self._device_registrar
+        printers = self._printer_manager.get_all_statuses() if self._printer_manager else []
+        queue_stats: dict[str, Any] = self._job_queue.get_queue_stats() if self._job_queue else {}
+        totals = {"pending": 0, "completed": 0, "failed": 0}
+        printer_rows = []
+        for p in printers:
+            stats = queue_stats.get(p["printerId"], {})
+            for key in totals:
+                totals[key] += int(stats.get(key, 0) or 0)
+            printer_rows.append(
+                {
+                    **p,
+                    "queue": {
+                        "pending": int(stats.get("pending", 0) or 0),
+                        "completed": int(stats.get("completed", 0) or 0),
+                        "failed": int(stats.get("failed", 0) or 0),
+                    },
+                    "lastJob": stats.get("lastJob"),
+                }
+            )
+
+        discovery = self._discovery.get_status_dict() if self._discovery else None
+        port = self._config.local_server.port
+        return {
+            "apiVersion": UI_API_VERSION,
+            "agent": {
+                "version": __version__,
+                "hostname": socket.gethostname(),
+                "platform": sys.platform,
+                "pid": os.getpid(),
+                "startedAt": self._started_at,
+                "deviceId": registrar.device_id if registrar else None,
+            },
+            "pairing": {
+                # "starting" until the registrar exists (first second after start)
+                "status": registrar.status if registrar else "starting",
+                "code": registrar.verification_code if registrar and registrar.status != "verified" else None,
+                "organization": registrar.organization_name if registrar else None,
+            },
+            "connection": {
+                "connected": bool(self._ws_client and self._ws_client.is_connected),
+                "ready": self._ws_client is not None,
+                "serverUrl": self._config.server.url,
+                "webAppUrl": self._config.resolved_web_app_url,
+            },
+            "printers": printer_rows,
+            "queue": totals,
+            "discovery": {
+                "found": len(discovery["printers"]) if discovery else 0,
+                "lastScanAt": discovery.get("lastScanAt") if discovery else None,
+            },
+            "problems": recent_log.recent_problems(),
+            "power": self._keep_awake.status_dict() if self._keep_awake else {"keepAwake": False, "active": False},
+            "paths": {
+                "logDir": str(self._config.log_path),
+                "logFile": str(self._config.log_file),
+                "dataDir": str(self._config.data_path),
+            },
+            "statusPageUrl": f"http://localhost:{port}/",
+        }
+
+    async def _handle_ui_state(self, request: web.Request) -> web.Response:
+        return web.json_response(self.build_ui_state())
+
+    async def _handle_ui_test_print(self, request: web.Request) -> web.Response:
+        printer_id = request.match_info["printer_id"]
+        if not self._printer_manager or not self._job_queue:
+            return web.json_response({"error": "not_ready"}, status=409)
+        printer = self._printer_manager.get_printer(printer_id)
+        if printer is None:
+            return web.json_response({"error": "unknown_printer"}, status=404)
+        job_id = f"local-test-{int(time.time() * 1000)}"
+        accepted = await self._job_queue.enqueue(
+            {
+                "jobId": job_id,
+                "printerId": printer_id,
+                "templateName": "_admin_test",
+                "_local": True,
+                "payload": {
+                    "printerName": printer.name,
+                    "jobId": job_id,
+                    "timestamp": time.strftime("%d.%m.%Y %H:%M:%S"),
+                    "body": f"Test-Druck aus dem OpenEOS Drucker-Agent auf {socket.gethostname()}.",
+                },
+            },
+            persist=False,
+        )
+        if not accepted:
+            return web.json_response({"error": "queue_rejected"}, status=409)
+        logger.info(f"Test print {job_id} for printer '{printer.name}' requested from the desktop window")
+        return web.json_response({"jobId": job_id}, status=202)
 
     async def _handle_api_discovery(self, request: web.Request) -> web.Response:
         if self._discovery:
@@ -447,3 +588,23 @@ class LocalServer:
             uptime=uptime,
         )
         return web.Response(text=page, content_type="text/html")
+
+
+def _is_loopback(remote: Optional[str]) -> bool:
+    if not remote:
+        return False
+    try:
+        addr = ipaddress.ip_address(remote.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped.is_loopback
+    return addr.is_loopback
+
+
+def _host_name(host: str) -> str:
+    """Host header without the port ("[::1]:8080" -> "[::1]")."""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    return host.rsplit(":", 1)[0] if ":" in host else host

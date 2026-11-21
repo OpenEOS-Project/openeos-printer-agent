@@ -157,6 +157,9 @@ def install_service(config_path: Optional[str], server_url: str) -> int:
         )
         # Restart automatically after a crash (1 min delay), like systemd's Restart=always.
         _set_failure_actions()
+        # The desktop window runs as the logged-in user and offers "restart
+        # service" - allow exactly that without an admin prompt.
+        allow_users_to_control()
         win32serviceutil.StartService(SERVICE_NAME)
     except Exception as e:
         print(f"Service installation failed: {e}", file=sys.stderr)
@@ -187,6 +190,48 @@ def _set_failure_actions() -> None:
             win32service.CloseServiceHandle(hscm)
     except Exception as e:
         logger.debug(f"Could not set service failure actions: {e}")
+
+
+# Interactive Users (S-1-5-4): everyone logged on at the console or via RDP.
+INTERACTIVE_USERS_SID = "S-1-5-4"
+# SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | SERVICE_INTERROGATE
+USER_CONTROL_RIGHTS = 0x0004 | 0x0010 | 0x0020 | 0x0080
+# Standard rights (winnt.h) - not exported by win32security
+READ_CONTROL = 0x00020000
+WRITE_DAC = 0x00040000
+
+
+def allow_users_to_control(service_name: str = SERVICE_NAME) -> bool:
+    """Add one ACE to the service's DACL: Interactive Users may query,
+    start and stop it. Changing the configuration, deleting the service or
+    the files stays with administrators. Best effort; idempotent."""
+    try:
+        import win32security  # type: ignore[import-not-found]
+
+        hscm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+        try:
+            hs = win32service.OpenService(hscm, service_name, READ_CONTROL | WRITE_DAC)
+            try:
+                sd = win32service.QueryServiceObjectSecurity(hs, win32security.DACL_SECURITY_INFORMATION)
+                dacl = sd.GetSecurityDescriptorDacl()
+                sid = win32security.ConvertStringSidToSid(INTERACTIVE_USERS_SID)
+                for i in range(dacl.GetAceCount()):
+                    (ace_type, _flags), mask, ace_sid = dacl.GetAce(i)
+                    if ace_type == win32security.ACCESS_ALLOWED_ACE_TYPE and ace_sid == sid:
+                        if mask & USER_CONTROL_RIGHTS == USER_CONTROL_RIGHTS:
+                            return True
+                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, USER_CONTROL_RIGHTS, sid)
+                sd.SetSecurityDescriptorDacl(1, dacl, 0)
+                win32service.SetServiceObjectSecurity(hs, win32security.DACL_SECURITY_INFORMATION, sd)
+                return True
+            finally:
+                win32service.CloseServiceHandle(hs)
+        finally:
+            win32service.CloseServiceHandle(hscm)
+    except Exception as e:
+        logger.warning(f"Could not allow users to start/stop the service: {e}")
+        print(f"Note: users cannot restart the service without admin rights ({e})", file=sys.stderr)
+        return False
 
 
 def remove_service() -> int:

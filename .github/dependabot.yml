@@ -24,6 +24,12 @@ updates:
         update-types: ["minor", "patch"]
     # Major-Updates kommen einzeln: die will man einzeln lesen.
     labels: ["dependencies"]
+    ignore:
+      # Linux-Builds brauchen altes glibc (requirements-ui.txt): ab 6.10
+      # (x86_64) bzw. 6.8.1 (aarch64) setzen die PyPI-Wheels zu neues glibc
+      # voraus. Nur von Hand anheben, wenn die Zielsysteme nachziehen.
+      - dependency-name: "PySide6-Essentials"
+        versions: [">= 6.10"]
 
   - package-ecosystem: "docker"
     directory: "/"
